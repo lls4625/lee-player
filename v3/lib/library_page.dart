@@ -102,6 +102,7 @@ PageRouteBuilder<void> openSourceLicensesRoute(ThemeData theme) {
   final colors = theme.colorScheme;
   return _opaquePageRoute(
     (_) => Theme(
+      key: const Key('open-source-licenses-page'),
       data: theme.copyWith(
         scaffoldBackgroundColor: colors.surface,
         appBarTheme: theme.appBarTheme.copyWith(
@@ -852,6 +853,13 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     }
   }
 
+  void cancelSettingsSwipe(PointerCancelEvent event) {
+    if (event.pointer != settingsSwipePointer) return;
+    settingsSwipePointer = null;
+    settingsSwipeStart = null;
+    settingsSwipePosition = null;
+  }
+
   Widget settings() {
     final sections = <Widget Function()>[
       () => const LeiSectionHeading(
@@ -1576,7 +1584,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
             onPointerDown: tab == 3 ? startSettingsSwipe : null,
             onPointerMove: tab == 3 ? updateSettingsSwipe : null,
             onPointerUp: tab == 3 ? finishSettingsSwipe : null,
-            onPointerCancel: tab == 3 ? finishSettingsSwipe : null,
+            onPointerCancel: tab == 3 ? cancelSettingsSwipe : null,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 900),
               child: Column(

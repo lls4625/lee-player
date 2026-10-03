@@ -1,15 +1,15 @@
-libmpv / FFmpeg 对应源码与重新链接说明
+libmpv / FFmpeg 对应源码与构建材料说明
 
-本应用使用的 LGPL 组件以动态 Framework 形式提供。与当前 App 版本对应的原始源码、补丁、构建配置、版本和 SHA-256 清单，将在以下公开页面长期提供：
-
-【发布前必须替换为实际 HTTPS 地址】
+本应用使用的 LGPL 组件以独立动态 Framework 形式嵌入。与当前 App 版本对应的原生组件源码版本、下载地址和 SHA-256 清单已随 App 收录在“原生组件对应源码清单”中；构建步骤及工程内替换条件已随 App 收录在“iOS 原生组件重新构建与替换说明”中。
 
 构建材料基线：https://github.com/media-kit/libmpv-darwin-build/tree/v0.6.0
 固定提交：4286f5557bdccc0747030e3c376ce5cd160a96a0
+依赖锁定清单：https://raw.githubusercontent.com/media-kit/libmpv-darwin-build/v0.6.0/downloads.lock
+原始二进制归档：https://github.com/media-kit/libmpv-darwin-build/releases/download/v0.6.0/libmpv-xcframeworks_v0.6.0_ios-universal-video-default.tar.gz
+原始二进制归档 SHA-256：a95bc18508af26136b8a408341c05b5585d644ec013f00ac07db09d2e28d36ae
 
-用户可以取得上述材料，重新构建 LGPL Framework，用自行修改的 Framework 替换项目中的对应动态 Framework，然后在 Xcode 中选择自己的 Apple Development Team，重新签名并安装到自己的设备。详细步骤见随源码材料提供的 RELINKING-IOS.md。
+上述固定版本的构建仓库包含用于生成原生 Framework 的构建脚本、交叉编译配置和补丁，可以用于重新构建或修改 LGPL 组件。
 
-如公开下载地址不可用，或需要取得与本版本对应的源码及重新链接材料，请联系：32661267@qq.com。
+当前 Release 不包含雷player 应用源码、可重新链接的应用对象代码、签名证书或 provisioning profile，也没有验证从 App Store 安装的成品可由终端用户直接替换 Framework 后继续运行。因此，本文件只陈述已经提供的原生组件源码和构建材料，不声称已经满足某一种 LGPL Combined Work 交付路径，也不构成额外的源码提供承诺。
 
 本说明不限制 LGPL 或其他适用开源许可证授予的任何权利。
-

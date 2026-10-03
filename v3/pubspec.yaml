@@ -26,4 +26,6 @@ flutter:
     - assets/legal/LIQUID_GLASS_WIDGETS_LICENSE.txt
     - assets/legal/NATIVE_THIRD_PARTY_NOTICES.txt
     - assets/legal/OPEN_SOURCE_OFFER.txt
+    - assets/legal/SOURCE_MANIFEST.txt
+    - assets/legal/RELINKING_IOS.txt
     - assets/legal/licenses/

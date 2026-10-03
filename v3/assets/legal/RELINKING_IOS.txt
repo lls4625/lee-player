@@ -1,0 +1,42 @@
+iOS 原生组件重新构建与替换说明
+
+适用范围
+本说明对应 App 内的 media_kit_libs_ios_video 1.1.4，以及 libmpv-darwin-build v0.6.0 的 ios-universal-video-default 动态 XCFramework 构建。构建需要 macOS、Xcode 命令行工具、Homebrew、Go、CMake、Meson 和 Ninja。
+
+一、取得固定构建材料
+
+git clone https://github.com/media-kit/libmpv-darwin-build.git
+cd libmpv-darwin-build
+git checkout 4286f5557bdccc0747030e3c376ce5cd160a96a0
+
+核对 git rev-parse HEAD 的输出必须为：
+4286f5557bdccc0747030e3c376ce5cd160a96a0
+
+二、构建当前使用的 iOS 动态 XCFramework
+
+brew install cmake go meson ninja
+make VERSION=v0.6.0 build/output/libmpv-xcframeworks_v0.6.0_ios-universal-video-default.tar.gz
+
+构建脚本会按 downloads.lock 下载并校验所有组件源码，应用该固定提交内的补丁，再生成与本应用相同布局的动态 XCFramework 归档。修改 LGPL 组件时，应在构建树中的相应源码或构建脚本上修改后执行同一目标。
+
+三、在具备应用工程源码时替换 Framework
+
+1. 解压生成的 libmpv-xcframeworks_v0.6.0_ios-universal-video-default.tar.gz。
+2. 在一份可构建的雷player 工程所使用的 media_kit_libs_ios_video-1.1.4/ios/Frameworks 目录中，用新生成的同名 .xcframework 替换 Mpv、Avcodec、Avfilter、Avformat、Avutil、Swresample、Swscale 及其所依赖的同名 XCFramework。
+3. 在雷player 工程执行 flutter clean、flutter pub get，再执行 flutter build ios --release --no-codesign。
+4. 打开 ios/Runner.xcworkspace，选择有效的 Apple Development Team、签名身份和 provisioning profile 后重新归档或安装。
+
+以上步骤是开发工程内的替换验证流程，不是针对已从 App Store 安装成品的可执行替换承诺。当前 Release 不包含雷player 应用源码、可重新链接的应用对象代码、签名证书或 provisioning profile；Apple 代码签名及分发限制也可能阻止终端用户直接修改已安装成品。仅凭本说明不能证明 LGPLv3 §4(d)(1) 的适当共享库机制实际可用，也不能替代 §4(d)(0) 可能要求的 Corresponding Application Code 或其他重链接材料。
+
+四、核对替换结果
+
+在构建出的 Runner.app/Frameworks 中确认存在 Mpv.framework、Avcodec.framework、Avformat.framework 等独立动态 Framework。可用以下命令核对动态链接：
+
+xcrun otool -L Runner.app/Frameworks/Mpv.framework/Mpv
+strings Runner.app/Frameworks/Mpv.framework/Mpv | grep 'Configuration:'
+strings Runner.app/Frameworks/Avutil.framework/Avutil | grep -E 'FFmpeg version|configuration:'
+
+当前官方二进制归档的 SHA-256 为：
+a95bc18508af26136b8a408341c05b5585d644ec013f00ac07db09d2e28d36ae
+
+本说明只覆盖原生 LGPL Framework 的重建，以及在已经合法取得可构建应用工程时的工程内替换。

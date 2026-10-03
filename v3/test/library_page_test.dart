@@ -220,7 +220,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(LegalDocumentPage), findsOneWidget);
     expect(find.text('版权与用户内容'), findsOneWidget);
-    await tester.pageBack();
+    await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('settings-swipe-area')), findsOneWidget);
 
@@ -228,9 +228,11 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('开源软件许可'));
     await tester.pump(const Duration(milliseconds: 300));
-    debugDumpApp();
-    expect(find.byType(LicensePage), findsOneWidget);
-    await tester.pageBack();
+    expect(
+      find.byKey(const Key('open-source-licenses-page'), skipOffstage: false),
+      findsOneWidget,
+    );
+    await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('settings-swipe-area')), findsOneWidget);
 

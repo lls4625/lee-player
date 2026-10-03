@@ -14,7 +14,6 @@ iOS 原生二进制来自 media-kit/libmpv-darwin-build v0.6.0 的 ios-universal
 
 mpv 使用 -Dgpl=false 构建。FFmpeg 使用 default flavor，包含 --enable-version3，不包含 --enable-gpl 或 --enable-nonfree；该 FFmpeg 构建适用 LGPL version 3 or later。各组件仍以其文件级版权声明和随 App 提供的完整许可证正文为准。
 
-原生库以独立动态 Framework 形式分发。对应源码、精确版本、哈希、构建脚本、补丁和重新链接方法见“libmpv / FFmpeg 对应源码与重新链接说明”。开源许可证授予的查看、修改、调试及逆向工程权利不受本应用自有版权声明限制。
+原生库以独立动态 Framework 形式嵌入。对应源码、精确版本、哈希、构建脚本、补丁以及当前具备和缺少的替换材料，见“libmpv / FFmpeg 对应源码与构建材料说明”“原生组件对应源码清单”和“iOS 原生组件重新构建与替换说明”。开源许可证授予的查看、修改、调试及逆向工程权利不受本应用自有版权声明限制。
 
 合规联系邮箱：32661267@qq.com
-

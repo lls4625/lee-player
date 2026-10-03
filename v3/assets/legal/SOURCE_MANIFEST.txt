@@ -1,0 +1,64 @@
+原生组件对应源码清单
+
+本清单对应 media_kit_libs_ios_video 1.1.4 所下载的 libmpv-darwin-build v0.6.0 iOS universal video default 二进制。这里只列出该 default/video 构建实际包含的第三方组件；encodersgpl 构建中的 x264、libvpx、libvorbis、libogg 和 fftools-ffi 未包含在本应用中。
+
+覆盖范围：本清单覆盖 Release 中嵌入的 Mpv、Avcodec、Avfilter、Avformat、Avutil、Swresample、Swscale、Ass、Freetype、Fribidi、Harfbuzz、Mbedtls、Mbedcrypto、Mbedx509、Uchardet、Xml2、Dav1d 和 Png16 Framework。系统提供的 libSystem、libiconv、libz、AudioToolbox、CoreFoundation、CoreMedia、CoreVideo 和 VideoToolbox 不由本应用分发。media_kit Flutter 插件包的 MIT 文本由 Flutter NOTICES 和 App 内许可页另行提供。
+
+本清单及固定构建仓库提供原生组件源码定位、哈希、构建脚本与补丁；不包含雷player 应用源码、应用对象代码、签名材料或完整 Combined Work 重链接包。
+
+构建仓库
+版本：v0.6.0
+提交：4286f5557bdccc0747030e3c376ce5cd160a96a0
+地址：https://github.com/media-kit/libmpv-darwin-build/tree/v0.6.0
+依赖锁定：https://raw.githubusercontent.com/media-kit/libmpv-darwin-build/v0.6.0/downloads.lock
+
+mpv 0.36.0
+https://github.com/mpv-player/mpv/archive/refs/tags/v0.36.0.tar.gz
+SHA-256 29abc44f8ebee013bb2f9fe14d80b30db19b534c679056e4851ceadf5a5e8bf6
+
+FFmpeg 6.0
+https://ffmpeg.org/releases/ffmpeg-6.0.tar.xz
+SHA-256 57be87c22d9b49c112b6d24bc67d42508660e6b718b3db89c44e47e289137082
+
+libass 0.17.1
+https://github.com/libass/libass/releases/download/0.17.1/libass-0.17.1.tar.xz
+SHA-256 f0da0bbfba476c16ae3e1cfd862256d30915911f7abaa1b16ce62ee653192784
+
+FreeType 2.13.2
+https://downloads.sourceforge.net/project/freetype/freetype2/2.13.2/freetype-2.13.2.tar.xz
+SHA-256 12991c4e55c506dd7f9b765933e62fd2be2e06d421505d7950a132e4f1bb484d
+
+FriBidi 1.0.13
+https://github.com/fribidi/fribidi/releases/download/v1.0.13/fribidi-1.0.13.tar.xz
+SHA-256 7fa16c80c81bd622f7b198d31356da139cc318a63fc7761217af4130903f54a2
+
+HarfBuzz 8.1.1
+https://github.com/harfbuzz/harfbuzz/archive/8.1.1.tar.gz
+SHA-256 b16e6bc0fc7e6a218583f40c7d201771f2e3072f85ef6e9217b36c1dc6b2aa25
+
+Mbed TLS 3.4.1
+https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v3.4.1.tar.gz
+SHA-256 a420fcf7103e54e775c383e3751729b8fb2dcd087f6165befd13f28315f754f5
+
+uchardet 0.0.8
+https://www.freedesktop.org/software/uchardet/releases/uchardet-0.0.8.tar.xz
+SHA-256 e97a60cfc00a1c147a674b097bb1422abd9fa78a2d9ce3f3fdcc2e78a34ac5f0
+
+libxml2 2.11.5
+https://download.gnome.org/sources/libxml2/2.11/libxml2-2.11.5.tar.xz
+SHA-256 3727b078c360ec69fa869de14bd6f75d7ee8d36987b071e6928d4720a28df3a6
+
+dav1d 1.2.1
+https://code.videolan.org/videolan/dav1d/-/archive/1.2.1/dav1d-1.2.1.tar.bz2
+SHA-256 a4003623cdc0109dec3aac8435520aa3fb12c4d69454fa227f2658cdb6dab5fa
+
+libpng 1.6.40
+https://github.com/glennrp/libpng/archive/v1.6.40.tar.gz
+SHA-256 62d25af25e636454b005c93cae51ddcd5383c40fa14aa3dae8f6576feb5692c2
+Meson WrapDB patch：https://wrapdb.mesonbuild.com/v2/libpng_1.6.40-1/get_patch
+Patch SHA-256 bad558070e0a82faa5c0ae553bcd12d49021fc4b628f232a8e58c3fbd281aae1
+来源说明：FreeType 2.13.2 的 subprojects/libpng.wrap 固定了上述源码与补丁；构建产物为 Png16.framework。
+
+二进制归档
+https://github.com/media-kit/libmpv-darwin-build/releases/download/v0.6.0/libmpv-xcframeworks_v0.6.0_ios-universal-video-default.tar.gz
+SHA-256 a95bc18508af26136b8a408341c05b5585d644ec013f00ac07db09d2e28d36ae

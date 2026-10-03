@@ -303,6 +303,11 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     }
   }
 
+  func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    if playback.rejectRetiringPiPStart(pictureInPictureController) { return }
+    _ = playback.rejectUnauthorizedAVPlayerPiPStart(pictureInPictureController)
+  }
+
   func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
     if playback.rejectRetiringPiPStart(pictureInPictureController) { return }
     if playback.pip === pictureInPictureController {

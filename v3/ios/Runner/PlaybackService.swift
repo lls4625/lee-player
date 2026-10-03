@@ -158,8 +158,12 @@ final class PlaybackService: NSObject {
   private var mediaIsAudio: Bool { guard let path = currentPath else { return false }; return library.audioExtensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased()) }
   private var enginePlaying: Bool { mediaKit?.playing ?? (player.timeControlStatus == .playing) }
   private var pipActive: Bool { mediaKitPiP?.isActive ?? (pip?.isPictureInPictureActive == true) }
+  private var pipAvailable: Bool {
+    !mediaIsAudio && AVPictureInPictureController.isPictureInPictureSupported()
+      && (mediaKit != nil || pip?.isPictureInPicturePossible == true)
+  }
   private var pipRequesting: Bool {
-    mediaKitPiPPreparing || mediaKitPiP != nil || mediaKitPiPRestoring || pipStartIssued || pipStartTimeout != nil || pipActive || !retiringPiP.isEmpty
+    mediaKitPiPPreparing || mediaKitPiP != nil || mediaKitPiPRestoring || pipStartIssued || pipActive || !retiringPiP.isEmpty
   }
   private var isSeeking: Bool { activeSeek != nil || pendingSeek != nil }
   private func pauseEngine() { if let mediaKit = mediaKit { mediaKit.pausePlayback() } else { player.pause() } }
@@ -172,9 +176,11 @@ final class PlaybackService: NSObject {
   var pip: AVPictureInPictureController?
   weak var pipDelegate: AVPictureInPictureControllerDelegate?
   private var pipPossibleObservation: NSKeyValueObservation?
-  private var pipStartTimeout: DispatchWorkItem?
   private var pipActivationTimeout: DispatchWorkItem?
   private var pipStartIssued = false
+  // Business invariant: background playback is audio-only. PiP requires an explicit button request.
+  private var avPlayerPiPAuthorized = false
+  private var avPlayerPresentationDetachedForBackground = false
   private var mediaKitPiP: MediaKitPiPRenderer?
   private var mediaKitPiPPreparing = false
   private var mediaKitPiPRequestID: String?
@@ -187,6 +193,9 @@ final class PlaybackService: NSObject {
     // can still be in flight even when isPictureInPictureActive is false.
     let controller = pip
     let needsRetirement = pipStartIssued || controller?.isPictureInPictureActive == true
+    avPlayerPiPAuthorized = false
+    pipPossibleObservation?.invalidate()
+    pipPossibleObservation = nil
     cancelPendingAVPlayerPiP()
     if let controller = controller {
       if needsRetirement {
@@ -198,6 +207,60 @@ final class PlaybackService: NSObject {
       }
     }
     pip = nil
+  }
+
+  private func prepareAVPlayerPiP() {
+    guard UIApplication.shared.applicationState == .active, mediaKit == nil,
+          AVPictureInPictureController.isPictureInPictureSupported(),
+          let videoLayer = surface?.videoLayer, videoLayer.player === player else { return }
+    if let controller = pip, controller.playerLayer === videoLayer {
+      controller.delegate = pipDelegate
+      controller.canStartPictureInPictureAutomaticallyFromInline = false
+      return
+    }
+    discardAVPlayerPiP()
+    guard let controller = AVPictureInPictureController(playerLayer: videoLayer) else { return }
+    controller.delegate = pipDelegate
+    controller.canStartPictureInPictureAutomaticallyFromInline = false
+    pip = controller
+    pipPossibleObservation = controller.observe(\.isPictureInPicturePossible,
+                                                 options: [.initial, .new]) { [weak self, weak controller] _, _ in
+      DispatchQueue.main.async {
+        guard let self = self, let controller = controller, self.pip === controller else { return }
+        self.publish()
+      }
+    }
+  }
+
+  private func attachAVPlayerPresentationIfAllowed() {
+    guard mediaKit == nil, let videoLayer = surface?.videoLayer else { return }
+    guard UIApplication.shared.applicationState == .active || avPlayerPiPAuthorized || pipActive else {
+      videoLayer.player = nil
+      avPlayerPresentationDetachedForBackground = true
+      return
+    }
+    videoLayer.player = player
+    avPlayerPresentationDetachedForBackground = false
+    prepareAVPlayerPiP()
+  }
+
+  private func suspendAVPlayerPresentationForBackground(lifecycleTransition: Bool = false) {
+    guard (lifecycleTransition || UIApplication.shared.applicationState != .active), mediaKit == nil,
+          !avPlayerPiPAuthorized, !pipActive else { return }
+    // A prepared controller can let iOS begin an automatic PiP transition before
+    // delegate rejection. Release it before detaching the layer so no PiP window exists.
+    discardAVPlayerPiP()
+    if let videoLayer = surface?.videoLayer, videoLayer.player === player {
+      videoLayer.player = nil
+    }
+    avPlayerPresentationDetachedForBackground = true
+  }
+
+  private func restoreAVPlayerPresentationAfterBackground() {
+    guard avPlayerPresentationDetachedForBackground else { return }
+    avPlayerPresentationDetachedForBackground = false
+    guard mediaKit == nil else { return }
+    attachAVPlayerPresentationIfAllowed()
   }
 
   private func retirePiP(_ controller: AVPictureInPictureController, renderer: MediaKitPiPRenderer? = nil) {
@@ -316,12 +379,18 @@ final class PlaybackService: NSObject {
         self?.pause(); self?.errorMessage = "音频设备已断开，点击播放继续"; self?.publish()
       }
     })
+    notifications.append(center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+      self?.suspendAVPlayerPresentationForBackground(lifecycleTransition: true)
+    })
     notifications.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
       guard let self = self else { return }
       if self.scrubbing { self.cancelScrub() }
       self.persist()
     })
-    notifications.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in self?.tick() })
+    notifications.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+      self?.restoreAVPlayerPresentationAfterBackground()
+      self?.tick()
+    })
     notifications.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
       self?.pause(); self?.errorMessage = "音频服务已重置，请重新选择课时播放"; self?.publish()
     })
@@ -367,7 +436,7 @@ final class PlaybackService: NSObject {
       "subtitleName": subtitleName, "audioTrack": mediaKitTracks["audioTrack"] ?? selectedAudio, "subtitleTrack": mediaKitTracks["subtitleTrack"] ?? selectedSubtitle,
       "audioTracks": mediaKitTracks["audioTracks"] ?? trackDescriptions(audioOptions, fallback: fallbackAudio),
       "subtitleTracks": mediaKitTracks["subtitleTracks"] ?? trackDescriptions(subtitleOptions, fallback: fallbackSubtitles),
-      "pipAvailable": !mediaIsAudio && AVPictureInPictureController.isPictureInPictureSupported(),
+      "pipAvailable": pipAvailable,
       "pipRequesting": pipRequesting]
   }
 
@@ -466,12 +535,12 @@ final class PlaybackService: NSObject {
       observations = Array(observations.prefix(1))
       player.replaceCurrentItem(with: nil)
       surface?.videoLayer.isHidden = false
-      surface?.videoLayer.player = player
       surface?.onLayout = nil
       if Self.prefersMediaKit(url) {
         openMediaKit(url: url, resume: resume, token: token)
         return
       }
+      attachAVPlayerPresentationIfAllowed()
       scheduleOpenTimeout(token: token)
       assetPreparation.async { [weak self] in
         do {
@@ -829,10 +898,10 @@ final class PlaybackService: NSObject {
     view.onLayout = nil
     if mediaKit != nil { view.videoLayer.player = nil; view.caption.isHidden = true; return }
     view.videoLayer.isHidden = false
-    view.videoLayer.player = player
     view.videoLayer.videoGravity = fit == "fill" ? .resizeAspectFill : fit == "stretch" ? .resize : .resizeAspect
     view.caption.text = subtitleText
     view.caption.isHidden = subtitleText.isEmpty
+    attachAVPlayerPresentationIfAllowed()
   }
 
   private func tick() {
@@ -1087,6 +1156,7 @@ final class PlaybackService: NSObject {
     guard generation == token else { return }
     cancelIntroDetection()
     clearBoundary()
+    discardAVPlayerPiP()
     do {
       let session = AVAudioSession.sharedInstance()
       try session.setCategory(.playback, mode: .moviePlayback, options: [])
@@ -1190,75 +1260,70 @@ final class PlaybackService: NSObject {
       guard let videoLayer = surface?.videoLayer, videoLayer.player === player else {
         throw LibraryFailure.message("当前视频画面尚未就绪，请稍后重试")
       }
-      guard let controller = pip ?? AVPictureInPictureController(playerLayer: videoLayer) else {
+      prepareAVPlayerPiP()
+      guard let controller = pip, controller.playerLayer === videoLayer else {
         throw LibraryFailure.message("无法创建系统画中画控制器")
       }
-      cancelPendingAVPlayerPiP()
       controller.delegate = delegate
-      controller.canStartPictureInPictureAutomaticallyFromInline = false
-      pip = controller
-      let timeout = DispatchWorkItem { [weak self, weak controller] in
-        guard let self = self, let controller = controller,
-              self.pip === controller, !self.pipStartIssued else { return }
+      guard controller.isPictureInPicturePossible else {
+        throw LibraryFailure.message("当前视频暂时无法进入画中画，请稍后重试")
+      }
+      cancelPendingAVPlayerPiP()
+      avPlayerPiPAuthorized = true
+      pipStartIssued = true
+      let activationTimeout = DispatchWorkItem { [weak self, weak controller] in
+        guard let self = self, let controller = controller, self.pip === controller else { return }
+        if controller.isPictureInPictureActive {
+          self.pipActivationTimeout = nil
+          self.publish()
+          return
+        }
+        self.pipPossibleObservation?.invalidate()
+        self.pipPossibleObservation = nil
+        self.avPlayerPiPAuthorized = false
+        self.retirePiP(controller)
         self.cancelPendingAVPlayerPiP()
-        self.notice?("当前视频画中画准备超时，请稍后重试")
+        self.pip = nil
+        self.suspendAVPlayerPresentationForBackground()
+        self.notice?("系统未能启动画中画，请重试")
         self.publish()
       }
-      pipStartTimeout = timeout
-      DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: timeout)
-      pipPossibleObservation = controller.observe(\.isPictureInPicturePossible,
-                                                   options: [.initial, .new]) { [weak self, weak controller] _, change in
-        guard change.newValue == true else { return }
-        DispatchQueue.main.async {
-          guard let self = self, let controller = controller,
-                self.pip === controller, self.pipStartTimeout != nil, !self.pipStartIssued else { return }
-          self.pipStartIssued = true
-          self.pipPossibleObservation?.invalidate()
-          self.pipPossibleObservation = nil
-          self.pipStartTimeout?.cancel()
-          self.pipStartTimeout = nil
-          let activationTimeout = DispatchWorkItem { [weak self, weak controller] in
-            guard let self = self, let controller = controller, self.pip === controller else { return }
-            if controller.isPictureInPictureActive {
-              self.pipActivationTimeout = nil
-              self.publish()
-              return
-            }
-            self.retirePiP(controller)
-            self.cancelPendingAVPlayerPiP()
-            self.pip = nil
-            self.notice?("系统未能启动画中画，请重试")
-            self.publish()
-          }
-          self.pipActivationTimeout = activationTimeout
-          DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: activationTimeout)
-          controller.startPictureInPicture()
-        }
-      }
+      pipActivationTimeout = activationTimeout
+      DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: activationTimeout)
+      controller.startPictureInPicture()
       publish()
     }
   }
 
   func finishAVPlayerPiP(_ controller: AVPictureInPictureController) {
     guard pip === controller else { return }
+    avPlayerPiPAuthorized = false
     cancelPendingAVPlayerPiP()
-    controller.delegate = nil
-    pip = nil
+    suspendAVPlayerPresentationForBackground()
     publish()
   }
 
   func didStartAVPlayerPiP(_ controller: AVPictureInPictureController) {
     guard pip === controller else { return }
+    guard avPlayerPiPAuthorized else {
+      controller.stopPictureInPicture()
+      suspendAVPlayerPresentationForBackground()
+      return
+    }
     pipActivationTimeout?.cancel()
     pipActivationTimeout = nil
     publish()
   }
 
+  func rejectUnauthorizedAVPlayerPiPStart(_ controller: AVPictureInPictureController) -> Bool {
+    guard pip === controller, !avPlayerPiPAuthorized else { return false }
+    controller.stopPictureInPicture()
+    suspendAVPlayerPresentationForBackground()
+    publish()
+    return true
+  }
+
   private func cancelPendingAVPlayerPiP() {
-    pipPossibleObservation?.invalidate()
-    pipPossibleObservation = nil
-    pipStartTimeout?.cancel()
-    pipStartTimeout = nil
     pipActivationTimeout?.cancel()
     pipActivationTimeout = nil
     pipStartIssued = false

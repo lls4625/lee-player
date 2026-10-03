@@ -1,4 +1,4 @@
-# 雷player · v1
+# 雷player · v3
 
 基于 Flutter 的 iOS 本地音视频播放器。
 
@@ -7,7 +7,7 @@
 ## 当前状态
 
 - 全项目可替换界面组件已迁移至 `liquid_glass_widgets 1.3.0`：页面、导航、列表、按钮、开关、滑块、输入、菜单、弹窗、底部面板、提示和进度指示。
-- 源码使用 Flutter 界面与 iOS AVPlayer/AVFoundation 系统播放服务，入口为 `lib/main.dart`；发布依赖不再包含 media_kit、libmpv 或 FFmpeg。
+- 源码使用 Flutter 界面与 iOS 原生播放服务，入口为 `lib/main.dart`。主播放路径包含 `media_kit 1.2.6`、`media_kit_video 2.0.1` 与 `media_kit_libs_video 1.0.7`；iOS Release 会动态嵌入 libmpv/FFmpeg 及其依赖 Framework。完整许可证、对应源码清单与重新构建说明位于 App 的“设置 → 关于雷player → 开源软件许可”。
 - 四个页面入口：课程库、播放历史、收藏、设置；点击课程打开播放页，返回后保留迷你播放器。
 - 文件夹和多文件复制导入，保留子目录，导入进度与取消，重名自动编号；目录浏览、自然顺序/修改时间/大小排序、新建目录、重命名、移动、回收站与恢复。
 - 同目录视频与音频组成队列；支持顺序连播、文件夹循环、单集循环、随机、上一节/下一节、断点续播与收藏。
