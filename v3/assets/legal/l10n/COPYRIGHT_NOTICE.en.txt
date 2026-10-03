@@ -1,0 +1,11 @@
+雷player Copyright and User Content Notice
+
+Copyright © 2026 Lianshun Li. All rights reserved.
+
+Lianshun Li holds the applicable rights in 雷player's original application code, interface, documentation, and project brand assets. Third-party software distributed with the app remains the property of its respective rights holders and is governed by its own open-source licenses.
+
+雷player is a local file player. It does not provide, host, search, download, or sell movies, courses, music, subtitles, or other third-party media. Users must import and play only content they created, are authorized to use, or may lawfully use. The app must not be used to infringe copyright, trademark, patent, or other legal rights.
+
+Copyright and license notices for Flutter/Dart open-source components distributed with the app are listed under Open-source Licenses. Nothing in this app's notices restricts rights granted to users by those licenses.
+
+Copyright and compliance contact: 32661267@qq.com

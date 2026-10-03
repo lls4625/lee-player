@@ -65,6 +65,8 @@ yarn.lock
 # Miscellaneous
 *.class
 *.lock
+!/v3/pubspec.lock
+!/v3/ios/Podfile.lock
 *.log
 *.pyc
 *.swp

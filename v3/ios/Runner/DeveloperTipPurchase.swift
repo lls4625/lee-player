@@ -57,7 +57,7 @@ final class DeveloperTipPurchase {
   private func snapshot() -> [String: Any] {
     let listed = Self.tips.compactMap { tip -> [String: String]? in
       guard let product = products[tip.id] else { return nil }
-      return ["id": tip.id, "name": tip.name, "price": product.displayPrice]
+      return ["id": tip.id, "name": product.displayName, "price": product.displayPrice]
     }
     var state: [String: Any] = [
       "revision": revision,

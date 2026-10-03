@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'player_model.dart';
 import 'glass_ui.dart';
+import 'app_localizations.dart';
 
 String _playbackRateLabel(double rate) {
   final ticks = (rate * 20).round();
@@ -75,15 +76,16 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
   Widget presetButton(int minutes, double width) {
     final selected = enteredMinutes == minutes;
     return SizedBox(width: width, child: GlassButton.custom(
-      onTap: () => selectPreset(minutes), label: '$minutes 分钟',
+      onTap: () => selectPreset(minutes),
+      label: AppLocalizations.of(context).text('$minutes 分钟'),
       height: 48, shape: leiRoundedControlShape,
       style: selected ? GlassButtonStyle.prominent : GlassButtonStyle.filled,
       glowColor: selected ? leiGold.withValues(alpha: .42) : null,
       platformViewBackdrop: true,
       child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-        Text('$minutes', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600,
+        LText('$minutes', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600,
           color: selected ? leiGold : Colors.white)),
-        Text(' 分钟', style: TextStyle(fontSize: 13,
+        LText(' 分钟', style: TextStyle(fontSize: 13,
           color: selected ? leiGold.withValues(alpha: .82) : Colors.white70)),
       ]),
     ));
@@ -91,12 +93,12 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
 
   Widget actionButton({required String label, required VoidCallback onTap,
     bool primary = false}) => GlassButton.custom(
-      onTap: onTap, label: label, height: 48,
+      onTap: onTap, label: AppLocalizations.of(context).text(label), height: 48,
       shape: const LiquidRoundedSuperellipse(borderRadius: 15),
       style: primary ? GlassButtonStyle.prominent : GlassButtonStyle.filled,
       glowColor: primary ? leiGold.withValues(alpha: .5) : null,
       platformViewBackdrop: true,
-      child: Text(label, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600,
+      child: LText(label, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600,
         color: primary ? leiGold : Colors.white)),
     );
 
@@ -126,18 +128,18 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
                 child: const Icon(Icons.timer_outlined, color: leiGold, size: 24)),
               const SizedBox(width: 14),
               Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text('定时停止', style: TextStyle(fontSize: 22,
+                const LText('定时停止', style: TextStyle(fontSize: 22,
                   fontWeight: FontWeight.w600, color: Colors.white)),
                 const SizedBox(height: 3),
-                Text(subtitle, maxLines: 2, style: const TextStyle(
+                LText(subtitle, maxLines: 2, style: const TextStyle(
                   fontSize: 13, height: 1.35, color: Colors.white60)),
               ])),
             ]),
             const SizedBox(height: 22),
             Row(children: [
-              const Expanded(child: Text('快捷选择', style: TextStyle(
+              const Expanded(child: LText('快捷选择', style: TextStyle(
                 fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white))),
-              Text('分钟', style: TextStyle(fontSize: 12,
+              LText('分钟', style: TextStyle(fontSize: 12,
                 color: Colors.white.withValues(alpha: .45))),
             ]),
             const SizedBox(height: 10),
@@ -148,7 +150,7 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
               ]);
             }),
             const SizedBox(height: 22),
-            const Text('自定义分钟数', style: TextStyle(
+            const LText('自定义分钟数', style: TextStyle(
               fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white)),
             const SizedBox(height: 9),
             AnimatedContainer(duration: const Duration(milliseconds: 160),
@@ -177,17 +179,17 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
                   onSubmitted: (_) => submit(),
                 )),
                 const SizedBox(width: 12),
-                const Text('分钟', style: TextStyle(fontSize: 16, color: Colors.white60)),
+                const LText('分钟', style: TextStyle(fontSize: 16, color: Colors.white60)),
               ])),
             const SizedBox(height: 8),
             if (errorText != null)
-              Text(errorText!, style: const TextStyle(fontSize: 12,
+              LText(errorText!, style: const TextStyle(fontSize: 12,
                 color: Colors.redAccent))
             else
               Row(children: [
-                const Expanded(child: Text('1～1440 分钟 · 最长 24 小时',
+                const Expanded(child: LText('1～1440 分钟 · 最长 24 小时',
                   style: TextStyle(fontSize: 12, color: Colors.white54))),
-                if (valid) Text(durationLabel(minutes), style: const TextStyle(
+                if (valid) LText(durationLabel(minutes), style: const TextStyle(
                   fontSize: 13, fontWeight: FontWeight.w600, color: leiGold)),
               ]),
             if (widget.timerActive) ...[
@@ -199,7 +201,7 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
                 style: GlassButtonStyle.transparent,
                 glowColor: Colors.redAccent.withValues(alpha: .35),
                 platformViewBackdrop: true,
-                child: const Text('关闭当前定时', style: TextStyle(
+                child: const LText('关闭当前定时', style: TextStyle(
                   fontSize: 14, fontWeight: FontWeight.w500, color: Colors.redAccent))),
             ],
             const SizedBox(height: 22),
@@ -378,7 +380,8 @@ class _PlaybackPageState extends State<PlaybackPage> {
     final percent = (value * 100).round();
     return IgnorePointer(child: Center(child: Semantics(
       liveRegion: true,
-      label: '${brightness ? '屏幕亮度' : '播放音量'} $percent%',
+      label: AppLocalizations.of(context).text(
+        '${brightness ? '屏幕亮度' : '播放音量'} $percent%'),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 90),
         curve: Curves.easeOut,
@@ -396,9 +399,9 @@ class _PlaybackPageState extends State<PlaybackPage> {
               : value <= .001 ? Icons.volume_off_rounded : Icons.volume_up_rounded,
               color: leiGold, size: 24),
             const SizedBox(width: 10),
-            Expanded(child: Text(brightness ? '亮度' : '音量',
+            Expanded(child: LText(brightness ? '亮度' : '音量',
               style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600))),
-            Text('$percent%', style: const TextStyle(color: Colors.white70,
+            LText('$percent%', style: const TextStyle(color: Colors.white70,
               fontFeatures: [FontFeature.tabularFigures()])),
           ]),
           const SizedBox(height: 12),
@@ -435,7 +438,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
           LeiSheetHeading(title: title, platformViewBackdrop: true),
           Expanded(child: ListView.builder(itemCount: entries.length, itemBuilder: (context, index) {
             final choice = entries[index];
-            return LeiGlassTile(title: Text(choice.value,
+            return LeiGlassTile(title: LText(choice.value,
               style: choice.key == selected ? TextStyle(color: leiAccent(context), fontWeight: FontWeight.w600) : null),
               trailing: choice.key == selected ? const LeiMediaIcon(icon: Icons.check) : null,
               onTap: () => Navigator.pop(context, choice.key));
@@ -452,7 +455,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
       builder: (context) => SafeArea(child: SizedBox(height: MediaQuery.sizeOf(context).height * .7,
         child: Column(children: [
           LeiSheetHeading(title: '播放队列', subtitle: '${paths.length} 个媒体 · 按课程顺序播放', platformViewBackdrop: true),
-          if (paths.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Text('队列为空，请返回课程库选择媒体。')),
+          if (paths.isEmpty) const Padding(padding: EdgeInsets.all(24), child: LText('队列为空，请返回课程库选择媒体。')),
           Expanded(child: ListView.builder(itemCount: paths.length, itemBuilder: (context, index) {
             final current = index == selectedIndex;
             final record = m.record(paths[index]);
@@ -460,10 +463,10 @@ class _PlaybackPageState extends State<PlaybackPage> {
             return LeiGlassTile(
               leading: SizedBox(width: 48, child: current
                 ? const LeiMediaIcon(icon: Icons.graphic_eq_rounded)
-                : Text('${index + 1}', textAlign: TextAlign.center)),
-              title: Text(paths[index].split('/').last, maxLines: 2, overflow: TextOverflow.ellipsis,
+                : LText('${index + 1}', textAlign: TextAlign.center)),
+              title: LText(paths[index].split('/').last, maxLines: 2, overflow: TextOverflow.ellipsis,
                 style: current ? const TextStyle(color: leiGold, fontWeight: FontWeight.w600) : null),
-              subtitle: Text(current ? '当前课程' : position > 0 ? '上次播至 ${timeLabel(position)}' : '尚未记录进度'),
+              subtitle: LText(current ? '当前课程' : position > 0 ? '上次播至 ${timeLabel(position)}' : '尚未记录进度'),
               onTap: () => Navigator.pop(context, index));
           })),
         ]))));
@@ -486,7 +489,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
               platformViewBackdrop: true,
               onPressed: ticks > 10 ? () => setDialogState(() { ticks--; }) : null),
             Expanded(child: Semantics(liveRegion: true,
-              child: Text(_playbackRateLabel(ticks / 20), textAlign: TextAlign.center,
+              child: LText(_playbackRateLabel(ticks / 20), textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.headlineMedium))),
             LeiGlassIconButton(icon: const Icon(Icons.add), tooltip: '加速 0.05 倍',
               platformViewBackdrop: true,
@@ -549,14 +552,15 @@ class _PlaybackPageState extends State<PlaybackPage> {
       content: Column(mainAxisSize: MainAxisSize.min, children: [
         Row(children: [
           const SizedBox(width: 44),
-          Expanded(child: Semantics(header: true, child: Text('播放信息',
+          Expanded(child: Semantics(header: true, child: LText('播放信息',
             textAlign: TextAlign.center, style: Theme.of(context).textTheme.titleLarge))),
           GlassIconButton(icon: const Icon(Icons.close_rounded),
             onPressed: () => Navigator.of(context, rootNavigator: true).pop(),
-            platformViewBackdrop: true, semanticLabel: '关闭播放信息'),
+            platformViewBackdrop: true,
+            semanticLabel: AppLocalizations.of(context).text('关闭播放信息')),
         ]),
         const SizedBox(height: 8),
-        SingleChildScrollView(child: SelectableText(text)),
+        SingleChildScrollView(child: LSelectableText(text)),
       ]),
       actions: [
         GlassDialogAction(label: '复制信息', onPressed: () async {
@@ -599,17 +603,17 @@ class _PlaybackPageState extends State<PlaybackPage> {
           return SafeArea(child: SizedBox(
             height: MediaQuery.sizeOf(context).height * .7,
             child: Column(children: [
-              LeiGlassTile(title: Text('${kind == 'audio' ? '音轨' : '字幕'} · ${options.length} 条'),
-                subtitle: Text(!sameMedia ? '媒体已变化，请关闭后重新选择'
+              LeiGlassTile(title: LText('${kind == 'audio' ? '音轨' : '字幕'} · ${options.length} 条'),
+                subtitle: LText(!sameMedia ? '媒体已变化，请关闭后重新选择'
                   : busy ? '正在确认轨道切换…' : '列表随播放状态更新')),
-              if (sameMedia && options.isEmpty) const LeiGlassTile(title: Text('暂未发现轨道')),
+              if (sameMedia && options.isEmpty) const LeiGlassTile(title: LText('暂未发现轨道')),
               Expanded(child: ListView.builder(itemCount: sameMedia ? rows.length : 0,
                 itemBuilder: (context, rowIndex) {
                   final row = rows[rowIndex];
                   final index = (row['index'] as num).toInt();
                   final details = row['details'] as String? ?? '';
-                  return LeiGlassTile(title: Text('${row['name']}'),
-                    subtitle: details.isEmpty ? null : Text(details),
+                  return LeiGlassTile(title: LText('${row['name']}'),
+                    subtitle: details.isEmpty ? null : LText(details),
                     trailing: index == selected ? const LeiMediaIcon(icon: Icons.check) : null,
                     onTap: busy ? null : () async {
                       if (submitting || m.state['generation'] != session) return;
@@ -688,41 +692,42 @@ class _PlaybackPageState extends State<PlaybackPage> {
         padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
         children: [
           Row(children: [
-            Expanded(child: Text(repeat ? 'A–B 片段复读' : '音量与亮度',
+            Expanded(child: LText(repeat ? 'A–B 片段复读' : '音量与亮度',
               style: Theme.of(context).textTheme.titleLarge)),
-            GlassIconButton(icon: const Icon(Icons.close), semanticLabel: '关闭',
+            GlassIconButton(icon: const Icon(Icons.close),
+              semanticLabel: AppLocalizations.of(context).text('关闭'),
               platformViewBackdrop: true, onPressed: () => Navigator.pop(sheetContext)),
           ]),
           const SizedBox(height: 24),
           if (repeat) ...[
-            Text('当前位置 ${timeLabel(m.position)}'),
+            LText('当前位置 ${timeLabel(m.position)}'),
             const SizedBox(height: 12),
             LeiGlassTile(
-              title: Text(m.number('a', -1) < 0 ? '设置 A 点' : 'A 点 · ${timeLabel(m.number('a'))}'),
+              title: LText(m.number('a', -1) < 0 ? '设置 A 点' : 'A 点 · ${timeLabel(m.number('a'))}'),
               leading: const LeiMediaIcon(icon: Icons.first_page),
               onTap: () => m.configure({'ab': 'a'})),
             const GlassDivider(),
             LeiGlassTile(
-              title: Text(m.number('b', -1) < 0 ? '设置 B 点' : 'B 点 · ${timeLabel(m.number('b'))}'),
+              title: LText(m.number('b', -1) < 0 ? '设置 B 点' : 'B 点 · ${timeLabel(m.number('b'))}'),
               leading: const LeiMediaIcon(icon: Icons.last_page),
               onTap: () => m.configure({'ab': 'b'})),
             const GlassDivider(),
-            LeiGlassTile(title: const Text('清除复读区间'),
+            LeiGlassTile(title: const LText('清除复读区间'),
               leading: const LeiMediaIcon(icon: Icons.clear), onTap: () => m.configure({'ab': 'clear'})),
             const SizedBox(height: 16),
-            const Text('在起点设置 A，播放到终点设置 B。也可先关闭面板，拖动进度后再设置。切换媒体会清除复读区间。'),
+            const LText('在起点设置 A，播放到终点设置 B。也可先关闭面板，拖动进度后再设置。切换媒体会清除复读区间。'),
           ] else ...[
-            const Text('播放音量'),
+            const LText('播放音量'),
             GlassSlider(quality: GlassQuality.minimal,
               value: m.number('volume', 1).clamp(0, 1).toDouble(),
               onChanged: (value) => m.configure({'volume': value})),
             const SizedBox(height: 24),
-            const Text('屏幕亮度'),
+            const LText('屏幕亮度'),
             GlassSlider(quality: GlassQuality.minimal, min: .05,
               value: m.number('brightness', .5).clamp(.05, 1).toDouble(),
               onChanged: (value) => m.configure({'brightness': value})),
             const SizedBox(height: 16),
-            const Text('播放画面左侧上下滑动调音量，右侧上下滑动调亮度；数值会自动保存。退出播放页面后恢复原屏幕亮度，系统音量仍可用手机音量键调整。'),
+            const LText('播放画面左侧上下滑动调音量，右侧上下滑动调亮度；数值会自动保存。退出播放页面后恢复原屏幕亮度，系统音量仍可用手机音量键调整。'),
           ],
         ],
       )),
@@ -730,8 +735,9 @@ class _PlaybackPageState extends State<PlaybackPage> {
   );
 
   Widget playbackButton(Widget icon, String label, VoidCallback? action) => Tooltip(
-    message: label,
-    child: GlassIconButton(icon: icon, semanticLabel: label,
+    message: AppLocalizations.of(context).text(label),
+    child: GlassIconButton(icon: icon,
+      semanticLabel: AppLocalizations.of(context).text(label),
       platformViewBackdrop: true, onPressed: action),
   );
 
@@ -740,9 +746,11 @@ class _PlaybackPageState extends State<PlaybackPage> {
     final label = '${rewind ? '后退' : '前进'} $seconds 秒';
     final icon = Icon(rewind ? Icons.fast_rewind_rounded : Icons.fast_forward_rounded,
       size: 22);
-    final value = Text('$seconds', maxLines: 1, softWrap: false);
-    return Tooltip(message: label, child: GlassButton.custom(
-      onTap: action ?? () {}, enabled: action != null, label: label,
+    final value = LText('$seconds', maxLines: 1, softWrap: false);
+    return Tooltip(message: AppLocalizations.of(context).text(label),
+      child: GlassButton.custom(
+      onTap: action ?? () {}, enabled: action != null,
+      label: AppLocalizations.of(context).text(label),
       width: 96, height: 44, shape: leiRoundedControlShape,
       platformViewBackdrop: true,
       child: Row(mainAxisAlignment: MainAxisAlignment.center, children: rewind
@@ -765,7 +773,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
           ? () => jump(forwardSeconds.toDouble()) : null),
     ];
     final tools = <Widget>[
-      playbackButton(Text(_playbackRateLabel(m.number('rate', 1))), '播放速度', speed),
+      playbackButton(LText(_playbackRateLabel(m.number('rate', 1))), '播放速度', speed),
       playbackButton(const Icon(Icons.repeat_rounded), 'A–B 片段复读', () => adjustmentSheet(true)),
       playbackButton(const Icon(Icons.subtitles_outlined), '音轨与字幕', tracks),
       playbackButton(const Icon(Icons.more_horiz), '更多播放选项', moreOptions),
@@ -790,11 +798,11 @@ class _PlaybackPageState extends State<PlaybackPage> {
       onChangeEnd: canSeek && !jumping ? endDrag : null,
     ),
     Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Row(children: [
-      Text(timeLabel(dragging ?? m.position), style: Theme.of(context).textTheme.labelMedium),
-      Expanded(child: Text(m.number('b', -1) >= 0 ? 'A–B 复读中'
+      LText(timeLabel(dragging ?? m.position), style: Theme.of(context).textTheme.labelMedium),
+      Expanded(child: LText(m.number('b', -1) >= 0 ? 'A–B 复读中'
         : m.number('a', -1) >= 0 ? '已设 A 点' : '', textAlign: TextAlign.center,
         style: Theme.of(context).textTheme.labelSmall?.copyWith(color: leiGold))),
-      Text(timeLabel(m.duration), style: Theme.of(context).textTheme.labelMedium),
+      LText(timeLabel(m.duration), style: Theme.of(context).textTheme.labelMedium),
     ])),
     const SizedBox(height: 12),
     transportBar(context),
@@ -807,9 +815,9 @@ class _PlaybackPageState extends State<PlaybackPage> {
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             const LeiMediaIcon(icon: Icons.error_outline_rounded),
             const SizedBox(height: 16),
-            Text('暂时无法播放', style: Theme.of(context).textTheme.titleLarge),
+            LText('暂时无法播放', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 12),
-            SelectableText('${m.state['error']}', textAlign: TextAlign.center),
+            LSelectableText('${m.state['error']}', textAlign: TextAlign.center),
             const SizedBox(height: 20),
             Wrap(spacing: 12, runSpacing: 12, alignment: WrapAlignment.center, children: [
               LeiGlassButton(label: '重试播放', icon: Icons.refresh,
@@ -865,7 +873,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (seekFeedback != null && !locked) IgnorePointer(child: Center(
       child: Container(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
         decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(18)),
-        child: Semantics(liveRegion: true, child: Text(seekFeedback!, style: const TextStyle(color: Colors.white))))
+        child: Semantics(liveRegion: true, child: LText(seekFeedback!, style: const TextStyle(color: Colors.white))))
     )),
     if (m.loading && !locked)
       const IgnorePointer(child: Center(child: GlassProgressIndicator.circular())),
@@ -874,10 +882,10 @@ class _PlaybackPageState extends State<PlaybackPage> {
         playbackButton(const Icon(Icons.arrow_back_ios_new), '返回课程库', () => Navigator.of(context).pop()),
         const SizedBox(width: 12),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-          Text(m.path.split('/').last, maxLines: 1,
+          LText(m.path.split('/').last, maxLines: 1,
             overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 3),
-          Text('第 ${m.queue.isEmpty ? 0 : m.number('index').toInt() + 1} / ${m.queue.length} 节',
+          LText('第 ${m.queue.isEmpty ? 0 : m.number('index').toInt() + 1} / ${m.queue.length} 节',
             style: Theme.of(context).textTheme.labelSmall?.copyWith(color: Colors.white70)),
         ])),
         const SizedBox(width: 12),
@@ -911,7 +919,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
       child: Column(mainAxisSize: MainAxisSize.min, children: [
         if (m.state['interrupted'] == true || m.state['detectingIntro'] == true)
           Padding(padding: const EdgeInsets.only(bottom: 8),
-            child: Text(m.state['interrupted'] == true ? '音频中断中，等待通话结束…' : '正在识别空白片头…')),
+            child: LText(m.state['interrupted'] == true ? '音频中断中，等待通话结束…' : '正在识别空白片头…')),
         progressBar(context),
       ])))),
     if (!locked && (m.state['error'] as String? ?? '').isNotEmpty) errorPanel(context),

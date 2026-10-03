@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'glass_ui.dart';
+import 'app_localizations.dart';
 
 class DeveloperTipProduct {
   const DeveloperTipProduct({
@@ -279,7 +280,7 @@ class _DeveloperTipPageState extends State<DeveloperTipPage>
       centerTitle: false,
       toolbarHeight: 64,
       padding: const EdgeInsets.symmetric(horizontal: 20),
-      title: const Text('打赏开发者'),
+      title: const LText('打赏开发者'),
       leading: LeiGlassIconButton(
         tooltip: '返回',
         icon: const Icon(Icons.arrow_back_rounded),
@@ -293,15 +294,15 @@ class _DeveloperTipPageState extends State<DeveloperTipPage>
           ListView(
             padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
             children: <Widget>[
-              Text('感谢你的支持', style: Theme.of(context).textTheme.headlineLarge),
+              LText('感谢你的支持', style: Theme.of(context).textTheme.headlineLarge),
               const SizedBox(height: 14),
               LeiSurface(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('你的每一份鼓励，都是雷player不断完善的动力。'),
+                    const LText('你的每一份鼓励，都是雷player不断完善的动力。'),
                     const SizedBox(height: 8),
-                    Text(
+                    LText(
                       '打赏完全自愿，是一次性、可重复购买的 App Store 消耗型项目；不解锁任何功能或内容，不影响免费使用，且不可恢复。',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
@@ -363,7 +364,7 @@ class _TipProducts extends StatelessWidget {
                       const GlassProgressIndicator.circular(size: 22),
                       const SizedBox(width: 10),
                     ],
-                    Expanded(child: Text(status)),
+                    Expanded(child: LText(status)),
                   ],
                 ),
                 if (!waiting &&
@@ -424,7 +425,7 @@ class _TipCard extends StatelessWidget {
   Widget build(BuildContext context) => Semantics(
     button: true,
     enabled: enabled,
-    label: '${product.name}，${product.price}',
+    label: '${AppLocalizations.of(context).text(product.name)}，${product.price}',
     child: GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: enabled ? onTap : null,
@@ -436,7 +437,7 @@ class _TipCard extends StatelessWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
+                LText(
                   product.name,
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.titleMedium,
@@ -449,7 +450,7 @@ class _TipCard extends StatelessWidget {
                       const GlassProgressIndicator.circular(size: 20),
                       const SizedBox(width: 8),
                     ],
-                    Text(
+                    LText(
                       product.price,
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.titleLarge
@@ -592,13 +593,13 @@ class _FireworksOverlayState extends State<_FireworksOverlay> {
                 children: [
                   Icon(Icons.favorite_rounded, size: 38, color: leiGold),
                   const SizedBox(height: 12),
-                  Text(
+                  LText(
                     '感谢你的「${widget.level.label}」！',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                   const SizedBox(height: 6),
-                  Text(
+                  LText(
                     widget.staticThanks ? '感谢你的支持。' : '愿每一份热爱都有回响。',
                     textAlign: TextAlign.center,
                   ),

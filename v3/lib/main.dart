@@ -1,15 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart' show CupertinoThemeData;
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 
 import 'player_model.dart';
 import 'library_page.dart';
+import 'app_localizations.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await LiquidGlassWidgets.initialize(enablePerformanceMonitor: false);
   final model = PlayerModel();
-  await model.loadAppearance();
+  await Future.wait([model.loadAppearance(), model.loadLanguage()]);
   runApp(
     LiquidGlassWidgets.wrap(
       brightnessResolver: Theme.maybeBrightnessOf,
@@ -29,16 +31,22 @@ class LeePlayerApp extends StatefulWidget {
 class _LeePlayerAppState extends State<LeePlayerApp> {
   PlayerModel get model => widget.model;
   late String appearance;
+  late AppLanguageMode languageMode;
   @override
   void initState() {
     super.initState();
     appearance = model.appearance;
+    languageMode = model.languageMode;
     model.addListener(appearanceChanged);
   }
 
   void appearanceChanged() {
-    if (appearance != model.appearance)
-      setState(() => appearance = model.appearance);
+    if (appearance != model.appearance || languageMode != model.languageMode) {
+      setState(() {
+        appearance = model.appearance;
+        languageMode = model.languageMode;
+      });
+    }
   }
 
   @override
@@ -88,6 +96,15 @@ class _LeePlayerAppState extends State<LeePlayerApp> {
   Widget build(BuildContext context) => MaterialApp(
     title: '雷player',
     debugShowCheckedModeBanner: false,
+    locale: languageMode.locale,
+    supportedLocales: AppLocalizations.supportedLocales,
+    localeListResolutionCallback: AppLocalizations.resolve,
+    localizationsDelegates: const [
+      AppLocalizations.delegate,
+      GlobalMaterialLocalizations.delegate,
+      GlobalWidgetsLocalizations.delegate,
+      GlobalCupertinoLocalizations.delegate,
+    ],
     theme: appTheme(Brightness.light),
     darkTheme: appTheme(Brightness.dark),
     themeMode: appearance == 'dark'

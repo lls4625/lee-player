@@ -106,6 +106,15 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       switch call.method {
       case "appearance":
         result(UserDefaults.standard.string(forKey: "appearance.mode") ?? "system"); return
+      case "language":
+        result(UserDefaults.standard.string(forKey: "language.mode") ?? "system"); return
+      case "setLanguage":
+        guard let value = args["value"] as? String,
+          ["system", "zh-Hans", "zh-Hant", "ja", "en"].contains(value) else {
+          throw LibraryFailure.message("Invalid language option")
+        }
+        UserDefaults.standard.set(value, forKey: "language.mode")
+        result(value); return
       case "setAppearance":
         guard let value = args["value"] as? String, ["system", "light", "dark"].contains(value) else {
           throw LibraryFailure.message("无效的外观选项")

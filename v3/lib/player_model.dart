@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'media_kit_playback.dart';
+import 'app_localizations.dart';
 
 class MediaEntry {
   MediaEntry(Map<dynamic, dynamic> data)
@@ -34,11 +35,17 @@ class PlayerModel extends ChangeNotifier {
   bool scanning = false, importing = false;
   int libraryRevision = 0;
   String appearance = 'dark';
+  AppLanguageMode languageMode = AppLanguageMode.system;
   String libraryLayout = 'list', librarySort = 'name';
   bool librarySortAscending = true;
   Future<bool> loadAppearance() => command('appearance', onValue: (value) { appearance = value as String; });
   Future<bool> setAppearance(String value) => command('setAppearance', args: {'value': value},
     onValue: (saved) { appearance = saved as String; });
+  Future<bool> loadLanguage() => command('language',
+    onValue: (value) { languageMode = AppLanguageModeValue.parse(value); });
+  Future<bool> setLanguage(AppLanguageMode value) => command('setLanguage',
+    args: {'value': value.value},
+    onValue: (saved) { languageMode = AppLanguageModeValue.parse(saved); });
   void applyLibraryPreferences(dynamic value) {
     final saved = Map<String, dynamic>.from(value as Map);
     final layout = saved['layout'] as String?;

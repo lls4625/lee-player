@@ -1,0 +1,43 @@
+雷player Privacy Policy
+
+Effective: October 2, 2026
+Developer: Lianshun Li
+Contact: 32661267@qq.com
+
+1. Scope
+
+This policy applies to the iOS app 雷player. 雷player is a local audio and video player. It does not provide user accounts, a cloud media library, advertising, or third-party media content services.
+
+2. Data Processing
+
+The developer does not currently collect, upload, sell, or share personal information, device identifiers, advertising data, usage analytics, or media content.
+
+Audio, video, subtitle files, and folders that you choose to import are copied to or stored only in the app's local container. File names, paths, playback position and history, favorites, playback settings, and limited playback diagnostics are processed and stored only on the device for playback, file management, resume, and troubleshooting. The developer cannot access this data remotely.
+
+The app uses the iOS document picker and file sharing to read only files you select. It does not scan private files outside that selection or upload media to a developer server.
+
+3. Network and Third-party Services
+
+This version needs no developer server and includes no advertising, tracking, third-party analytics, social sign-in, or third-party media platform integration. It cannot download, save, convert, or stream content from Apple Music, YouTube, SoundCloud, Vimeo, or other third-party sources.
+
+The app includes open-source components for local playback. License and source information is available under Settings → About 雷player → Open-source Licenses. Their inclusion does not mean user data is sent to their authors.
+
+4. In-app Purchases
+
+This version offers completely optional developer tips using consumable Apple StoreKit in-app purchases. Tips unlock no feature, content, or service; do not affect free use; may be purchased repeatedly; and cannot be restored. Apple and the App Store process payment accounts, payment details, and transaction verification. The app never receives complete payment-card information. It verifies product identity, product type, and transaction validity on device, and stores a limited set of processed transaction identifiers locally to avoid showing the same thank-you effect twice. Transactions are not sent to a developer server.
+
+5. Retention and Deletion
+
+Local playback records and settings remain until you clear them in the app, delete related files, or uninstall the app. Use Clear Playback History and Trash to manage data. Uninstalling removes data in the app container. The developer has no server copy to delete separately.
+
+6. Children's Privacy
+
+雷player is not directed primarily to children and does not knowingly collect children's personal information. Users are responsible for their right to play content and its age suitability.
+
+7. User Content and Copyright
+
+雷player provides no media content. Import, store, and play only files you created, are authorized to use, or may lawfully use. Do not use the app to infringe copyright, trademark, or other legal rights.
+
+8. Changes and Contact
+
+If features or data practices change, this policy will be updated with the app and its effective date revised. Questions about privacy or this policy may be sent to 32661267@qq.com.

@@ -1,13 +1,15 @@
 name: leeplayer
 description: "Local course video player for iOS."
 publish_to: 'none'
-version: 0.1.0+1
+version: 3.0.0+1
 
 environment:
   sdk: ^3.13.2
 
 dependencies:
   flutter:
+    sdk: flutter
+  flutter_localizations:
     sdk: flutter
   liquid_glass_widgets: 1.3.0
   media_kit: 1.2.6
@@ -28,4 +30,5 @@ flutter:
     - assets/legal/OPEN_SOURCE_OFFER.txt
     - assets/legal/SOURCE_MANIFEST.txt
     - assets/legal/RELINKING_IOS.txt
+    - assets/legal/l10n/
     - assets/legal/licenses/

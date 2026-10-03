@@ -4,6 +4,8 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 
+import 'app_localizations.dart';
+
 export 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 
 const leiGold = Color(0xffffc83d);
@@ -76,9 +78,9 @@ class LeiSectionHeading extends StatelessWidget {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(title, style: Theme.of(context).textTheme.headlineLarge),
+        LText(title, style: Theme.of(context).textTheme.headlineLarge),
         const SizedBox(height: 6),
-        Text(
+        LText(
           subtitle,
           style: Theme.of(context).textTheme.bodyMedium
               ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
@@ -123,14 +125,14 @@ class LeiSheetHeading extends StatelessWidget {
             children: [
               Semantics(
                 header: true,
-                child: Text(
-                  title,
+                child: LText(
+                  AppLocalizations.of(context).text(title),
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
               ),
               if (subtitle != null) ...[
                 const SizedBox(height: 6),
-                Text(subtitle!, style: Theme.of(context).textTheme.bodySmall),
+                LText(subtitle!, style: Theme.of(context).textTheme.bodySmall),
               ],
             ],
           ),
@@ -138,7 +140,7 @@ class LeiSheetHeading extends StatelessWidget {
         const SizedBox(width: 8),
         LeiGlassIconButton(
           icon: const Icon(Icons.close_rounded),
-          tooltip: '关闭面板',
+          tooltip: AppLocalizations.of(context).text('关闭面板'),
           platformViewBackdrop: platformViewBackdrop,
           onPressed: () => Navigator.of(context).pop(),
         ),
@@ -164,10 +166,17 @@ class LeiGlassIconButton extends StatelessWidget {
     final button = GlassIconButton(
       icon: icon,
       onPressed: onPressed,
-      semanticLabel: tooltip,
+      semanticLabel: tooltip == null
+          ? null
+          : AppLocalizations.of(context).text(tooltip!),
       platformViewBackdrop: platformViewBackdrop,
     );
-    return tooltip == null ? button : Tooltip(message: tooltip!, child: button);
+    return tooltip == null
+        ? button
+        : Tooltip(
+            message: AppLocalizations.of(context).text(tooltip!),
+            child: button,
+          );
   }
 }
 
@@ -186,7 +195,7 @@ class LeiGlassButton extends StatelessWidget {
   Widget build(BuildContext context) => GlassButton.custom(
     onTap: onPressed ?? () {},
     enabled: onPressed != null,
-    label: label,
+    label: AppLocalizations.of(context).text(label),
     height: 48,
     shape: leiRoundedControlShape,
     child: Padding(
@@ -200,7 +209,7 @@ class LeiGlassButton extends StatelessWidget {
             const SizedBox(width: 8),
           ],
           Flexible(
-            child: Text(label, textAlign: TextAlign.center, softWrap: true),
+            child: LText(label, textAlign: TextAlign.center, softWrap: true),
           ),
         ],
       ),
@@ -244,13 +253,25 @@ Future<T?> showLeiDialog<T>({
                   : GlassQuality.standard,
               platformViewBackdrop: platformViewBackdrop,
               child: GlassDialog(
-                title: title,
-                message: message,
+                title: title == null
+                    ? null
+                    : AppLocalizations.of(context).text(title),
+                message: message == null
+                    ? null
+                    : AppLocalizations.of(context).text(message),
                 content: content,
                 quality: platformViewBackdrop
                     ? GlassQuality.minimal
                     : GlassQuality.standard,
-                actions: actions,
+                actions: [
+                  for (final action in actions)
+                    GlassDialogAction(
+                      label: AppLocalizations.of(context).text(action.label),
+                      onPressed: action.onPressed,
+                      isPrimary: action.isPrimary,
+                      isDestructive: action.isDestructive,
+                    ),
+                ],
               ),
             ),
           ),
@@ -403,7 +424,7 @@ class LeiGlassMenu extends StatelessWidget {
         [
           for (final entry in choices.entries)
             GlassMenuItem(
-              title: entry.value,
+              title: AppLocalizations.of(context).text(entry.value),
               height: itemHeight,
               onTap: () => onSelected(entry.key),
               isSelected: entry.key == selected,
@@ -445,7 +466,7 @@ class LeiGlassMenu extends StatelessWidget {
 void showLeiToast(BuildContext context, String message) {
   GlassToast.show(
     context,
-    message: message,
+    message: AppLocalizations.of(context).text(message),
     type: GlassToastType.info,
     quality: GlassQuality.minimal,
     position: GlassToastPosition.top,
