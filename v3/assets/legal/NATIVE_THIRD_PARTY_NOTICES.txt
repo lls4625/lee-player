@@ -1,0 +1,20 @@
+雷player 原生第三方软件声明
+
+本应用包含 media_kit 1.2.6、media_kit_video 2.0.1 和 media_kit_libs_video 1.0.7。
+
+iOS 原生二进制来自 media-kit/libmpv-darwin-build v0.6.0 的 ios-universal-video-default 构建：
+
+构建仓库标签：v0.6.0
+构建仓库提交：4286f5557bdccc0747030e3c376ce5cd160a96a0
+构建脚本与补丁：https://github.com/media-kit/libmpv-darwin-build/tree/v0.6.0
+二进制归档：https://github.com/media-kit/libmpv-darwin-build/releases/download/v0.6.0/libmpv-xcframeworks_v0.6.0_ios-universal-video-default.tar.gz
+二进制归档 SHA-256：a95bc18508af26136b8a408341c05b5585d644ec013f00ac07db09d2e28d36ae
+
+该构建包含 mpv 0.36.0、FFmpeg 6.0、libass 0.17.1、FreeType 2.13.2、FriBidi 1.0.13、HarfBuzz 8.1.1、Mbed TLS 3.4.1、uchardet 0.0.8、libxml2 2.11.5、dav1d 1.2.1 和 libpng 1.6.40。
+
+mpv 使用 -Dgpl=false 构建。FFmpeg 使用 default flavor，包含 --enable-version3，不包含 --enable-gpl 或 --enable-nonfree；该 FFmpeg 构建适用 LGPL version 3 or later。各组件仍以其文件级版权声明和随 App 提供的完整许可证正文为准。
+
+原生库以独立动态 Framework 形式分发。对应源码、精确版本、哈希、构建脚本、补丁和重新链接方法见“libmpv / FFmpeg 对应源码与重新链接说明”。开源许可证授予的查看、修改、调试及逆向工程权利不受本应用自有版权声明限制。
+
+合规联系邮箱：32661267@qq.com
+

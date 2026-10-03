@@ -1,0 +1,135 @@
+{
+  "appPolicies" : {
+    "eula" : "",
+    "policies" : [
+      {
+        "locale" : "zh_Hans",
+        "policyText" : "",
+        "policyURL" : ""
+      }
+    ]
+  },
+  "identifier" : "71C2A84F",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "6",
+      "familyShareable" : false,
+      "internalID" : "9000000001",
+      "localizations" : [
+        {
+          "description" : "一次性支持雷player持续开发，不解锁额外功能，不可恢复。",
+          "displayName" : "一份鼓励",
+          "locale" : "zh_Hans"
+        }
+      ],
+      "productID" : "vip.ichiki.javalee.leeplayer.tip.small",
+      "referenceName" : "一份鼓励",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "18",
+      "familyShareable" : false,
+      "internalID" : "9000000002",
+      "localizations" : [
+        {
+          "description" : "一次性支持雷player持续开发，不解锁额外功能，不可恢复。",
+          "displayName" : "暖心支持",
+          "locale" : "zh_Hans"
+        }
+      ],
+      "productID" : "vip.ichiki.javalee.leeplayer.tip.medium",
+      "referenceName" : "暖心支持",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "68",
+      "familyShareable" : false,
+      "internalID" : "9000000003",
+      "localizations" : [
+        {
+          "description" : "一次性支持雷player持续开发，不解锁额外功能，不可恢复。",
+          "displayName" : "特别支持",
+          "locale" : "zh_Hans"
+        }
+      ],
+      "productID" : "vip.ichiki.javalee.leeplayer.tip.large",
+      "referenceName" : "特别支持",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "168",
+      "familyShareable" : false,
+      "internalID" : "9000000004",
+      "localizations" : [
+        {
+          "description" : "一次性支持雷player持续开发，不解锁额外功能，不可恢复。",
+          "displayName" : "大力支持",
+          "locale" : "zh_Hans"
+        }
+      ],
+      "productID" : "vip.ichiki.javalee.leeplayer.tip.xlarge",
+      "referenceName" : "大力支持",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "298",
+      "familyShareable" : false,
+      "internalID" : "9000000005",
+      "localizations" : [
+        {
+          "description" : "一次性支持雷player持续开发，不解锁额外功能，不可恢复。",
+          "displayName" : "顶级鼓励",
+          "locale" : "zh_Hans"
+        }
+      ],
+      "productID" : "vip.ichiki.javalee.leeplayer.tip.premium",
+      "referenceName" : "顶级鼓励",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "688",
+      "familyShareable" : false,
+      "internalID" : "9000000006",
+      "localizations" : [
+        {
+          "description" : "一次性支持雷player持续开发，不解锁额外功能，不可恢复。",
+          "displayName" : "夯",
+          "locale" : "zh_Hans"
+        }
+      ],
+      "productID" : "vip.ichiki.javalee.leeplayer.tip.strong",
+      "referenceName" : "夯",
+      "type" : "Consumable"
+    }
+  ],
+  "settings" : {
+    "_askToBuyEnabled" : false,
+    "_billingGracePeriodEnabled" : false,
+    "_billingIssuesEnabled" : false,
+    "_disableDialogs" : false,
+    "_failTransactionsEnabled" : false,
+    "_locale" : "zh_Hans",
+    "_renewalBillingIssuesEnabled" : false,
+    "_storefront" : "CHN",
+    "_storeKitErrors" : [
+
+    ],
+    "_timeRate" : 0
+  },
+  "subscriptionBundleGroups" : [
+
+  ],
+  "subscriptionGroups" : [
+
+  ],
+  "subscriptionSuiteGroups" : [
+
+  ],
+  "version" : {
+    "major" : 6,
+    "minor" : 3
+  }
+}

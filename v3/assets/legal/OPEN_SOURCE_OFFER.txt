@@ -1,0 +1,15 @@
+libmpv / FFmpeg 对应源码与重新链接说明
+
+本应用使用的 LGPL 组件以动态 Framework 形式提供。与当前 App 版本对应的原始源码、补丁、构建配置、版本和 SHA-256 清单，将在以下公开页面长期提供：
+
+【发布前必须替换为实际 HTTPS 地址】
+
+构建材料基线：https://github.com/media-kit/libmpv-darwin-build/tree/v0.6.0
+固定提交：4286f5557bdccc0747030e3c376ce5cd160a96a0
+
+用户可以取得上述材料，重新构建 LGPL Framework，用自行修改的 Framework 替换项目中的对应动态 Framework，然后在 Xcode 中选择自己的 Apple Development Team，重新签名并安装到自己的设备。详细步骤见随源码材料提供的 RELINKING-IOS.md。
+
+如公开下载地址不可用，或需要取得与本版本对应的源码及重新链接材料，请联系：32661267@qq.com。
+
+本说明不限制 LGPL 或其他适用开源许可证授予的任何权利。
+
