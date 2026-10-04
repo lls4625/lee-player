@@ -44,8 +44,8 @@ final class LeeMediaKitEngine {
       guard let self = self, !self.stopped else { completion?(false); return }
       if !success {
         self.recordDiagnostic("\(method) rejected")
-        if method == "open" || method == "play" {
-          self.failure = method == "open" ? "media_kit_open_failed" : "media_kit_play_failed"
+        if method == "open" {
+          self.failure = "media_kit_open_failed"
           self.changed?()
         }
       }
@@ -60,7 +60,9 @@ final class LeeMediaKitEngine {
   }
 
   func pausePlayback() { send("pause"); recordDiagnostic("pause") }
-  func resumePlayback() { send("play"); recordDiagnostic("resume") }
+  func resumePlayback(completion: @escaping (Bool) -> Void) {
+    send("play", completion: completion); recordDiagnostic("resume")
+  }
   func stopPlayback() {
     guard !stopped else { return }
     stopped = true; changed = nil
@@ -154,6 +156,9 @@ final class PlaybackService: NSObject {
   private var boundaryObserver: Any?
   private var preparedMediaKit = false
   private var openingTimeout: DispatchWorkItem?
+  private var audioRecoveryWorkItem: DispatchWorkItem?
+  private var audioRecoveryPending = false
+  private var audioRecoveryAttempt = 0
   private var lastDiagnostic = ""
   private var mediaIsAudio: Bool { guard let path = currentPath else { return false }; return library.audioExtensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased()) }
   private var enginePlaying: Bool { mediaKit?.playing ?? (player.timeControlStatus == .playing) }
@@ -167,7 +172,15 @@ final class PlaybackService: NSObject {
   }
   private var isSeeking: Bool { activeSeek != nil || pendingSeek != nil }
   private func pauseEngine() { if let mediaKit = mediaKit { mediaKit.pausePlayback() } else { player.pause() } }
-  private func resumeEngine() { if let mediaKit = mediaKit { mediaKit.rate = rate; mediaKit.resumePlayback() } else { player.playImmediately(atRate: rate) } }
+  private func resumeEngine(completion: @escaping (Bool) -> Void) {
+    if let mediaKit = mediaKit {
+      mediaKit.rate = rate
+      mediaKit.resumePlayback(completion: completion)
+    } else {
+      player.playImmediately(atRate: rate)
+      completion(true)
+    }
+  }
 
   let library: CourseLibrary
   var changed: (([String: Any]) -> Void)?
@@ -389,11 +402,13 @@ final class PlaybackService: NSObject {
       self.persist()
     })
     notifications.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-      self?.restoreAVPlayerPresentationAfterBackground()
-      self?.tick()
+      guard let self = self else { return }
+      self.restoreAVPlayerPresentationAfterBackground()
+      if self.audioRecoveryPending { self.attemptAudioRecovery(resetAttempts: true) }
+      self.tick()
     })
     notifications.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
-      self?.pause(); self?.errorMessage = "audio_service_reset"; self?.publish()
+      self?.mediaServicesWereReset()
     })
     notifications.append(center.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] note in
       guard let self = self, let item = note.object as? AVPlayerItem, item === self.player.currentItem else { return }
@@ -412,6 +427,7 @@ final class PlaybackService: NSObject {
     sleepTimer?.invalidate()
     heartbeat?.invalidate()
     openingTimeout?.cancel(); seekTimeout?.cancel()
+    audioRecoveryWorkItem?.cancel()
     mediaKitPiPRestoreTimeout?.cancel()
     cancelPendingAVPlayerPiP()
     mediaKitPiP?.stop()
@@ -499,6 +515,7 @@ final class PlaybackService: NSObject {
 
   private func load(resume: Bool, autoplay: Bool = true) {
     guard let path = currentPath else { return }
+    cancelAudioRecovery()
     assetPreparationTask?.cancel()
     assetPreparationTask = nil
     finishTrackSelection("track_selection_stale")
@@ -679,25 +696,93 @@ final class PlaybackService: NSObject {
     if let deadline = sleepUntil, Date() >= deadline { sleepTimer?.invalidate(); sleepTimer = nil; sleepUntil = nil; pause(); return }
     if player.currentItem?.status == .failed { load(resume: true); return }
     wantsPlayback = true
+    attemptAudioRecovery(resetAttempts: true)
+  }
+
+  private func attemptAudioRecovery(resetAttempts: Bool = false) {
+    guard currentPath != nil, wantsPlayback else { cancelAudioRecovery(); return }
+    guard timelineReady, !loading, !isSeeking, !scrubbing else {
+      audioRecoveryPending = true
+      publish()
+      return
+    }
+    guard !interrupted else {
+      audioRecoveryPending = true
+      errorMessage = ""
+      pauseEngine()
+      publish()
+      return
+    }
+    if resetAttempts {
+      audioRecoveryWorkItem?.cancel()
+      audioRecoveryWorkItem = nil
+      audioRecoveryAttempt = 0
+    }
+    let token = generation
+    let path = currentPath
     do {
       try activateAudioSession()
+      audioRecoveryPending = false
       errorMessage = ""
       if duration > 0 && position >= duration - 0.1 { load(resume: false); return }
-      resumeEngine()
-      publish()
+      resumeEngine { [weak self] success in
+        DispatchQueue.main.async {
+          guard let self = self, self.generation == token, self.currentPath == path,
+                self.wantsPlayback else { return }
+          if success {
+            self.cancelAudioRecovery()
+            self.errorMessage = ""
+            self.publish()
+          } else {
+            self.lastDiagnostic = "media_kit play rejected during audio recovery"
+            self.deferAudioRecovery()
+          }
+        }
+      }
     } catch {
       lastDiagnostic = error.localizedDescription
-      if interrupted {
-        errorMessage = ""
-        pauseEngine()
-        publish()
-      } else {
-        fail("audio_permission_failed")
-      }
+      deferAudioRecovery()
     }
   }
 
+  private func deferAudioRecovery() {
+    audioRecoveryPending = wantsPlayback
+    errorMessage = ""
+    pauseEngine()
+    publish()
+    scheduleAudioRecoveryRetry()
+  }
+
+  private func scheduleAudioRecoveryRetry() {
+    audioRecoveryWorkItem?.cancel()
+    audioRecoveryWorkItem = nil
+    guard audioRecoveryPending, wantsPlayback, !interrupted,
+          UIApplication.shared.applicationState == .active else { return }
+    let delays = [0.25, 0.75, 1.5]
+    guard audioRecoveryAttempt < delays.count else { return }
+    let delay = delays[audioRecoveryAttempt]
+    audioRecoveryAttempt += 1
+    let token = generation
+    let path = currentPath
+    let work = DispatchWorkItem { [weak self] in
+      guard let self = self, self.generation == token, self.currentPath == path,
+            self.audioRecoveryPending, self.wantsPlayback else { return }
+      self.audioRecoveryWorkItem = nil
+      self.attemptAudioRecovery()
+    }
+    audioRecoveryWorkItem = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+  }
+
+  private func cancelAudioRecovery(clearPending: Bool = true) {
+    audioRecoveryWorkItem?.cancel()
+    audioRecoveryWorkItem = nil
+    audioRecoveryAttempt = 0
+    if clearPending { audioRecoveryPending = false }
+  }
+
   func pause() {
+    cancelAudioRecovery()
     cancelIntroDetection()
     wantsPlayback = false; resumeAfterInterruption = false
     scrubbing = false
@@ -957,6 +1042,7 @@ final class PlaybackService: NSObject {
   }
 
   private func fail(_ message: String) {
+    cancelAudioRecovery()
     finishTrackSelection("track_selection_stale")
     cancelIntroDetection()
     assetPreparationTask?.cancel(); assetPreparationTask = nil
@@ -983,12 +1069,15 @@ final class PlaybackService: NSObject {
           $0.portType == .builtInSpeaker
         }
       if routeDisconnected || recentlyReturnedToSpeaker {
+        cancelAudioRecovery()
         interrupted = false; resumeAfterInterruption = false; wantsPlayback = false
         scrubbing = false; errorMessage = ""
         pauseEngine(); persist(); publish()
         return
       }
       resumeAfterInterruption = wantsPlayback
+      cancelAudioRecovery(clearPending: false)
+      audioRecoveryPending = resumeAfterInterruption
       interrupted = true; scrubbing = false; errorMessage = ""
       pauseEngine(); persist(); publish()
     } else {
@@ -997,7 +1086,14 @@ final class PlaybackService: NSObject {
       let resume = resumeAfterInterruption && wantsPlayback && autoResume && options.contains(.shouldResume)
       resumeAfterInterruption = false
       errorMessage = ""
-      if resume { play() } else { wantsPlayback = false; publish() }
+      if resume {
+        audioRecoveryPending = true
+        attemptAudioRecovery(resetAttempts: true)
+      } else {
+        cancelAudioRecovery()
+        wantsPlayback = false
+        publish()
+      }
     }
   }
 
@@ -1005,6 +1101,7 @@ final class PlaybackService: NSObject {
     guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
       let reason = AVAudioSession.RouteChangeReason(rawValue: raw),
       reason == .oldDeviceUnavailable else { return }
+    cancelAudioRecovery()
     cancelIntroDetection()
     wantsPlayback = false; resumeAfterInterruption = false; scrubbing = false
     pauseEngine(); errorMessage = ""
@@ -1038,6 +1135,16 @@ final class PlaybackService: NSObject {
     interrupted = false
     resumeAfterInterruption = false
     routeLossRecoveryDeadline = 0
+  }
+
+  private func mediaServicesWereReset() {
+    errorMessage = ""
+    guard currentPath != nil else { publish(); return }
+    let shouldResume = wantsPlayback
+    persist()
+    load(resume: true, autoplay: shouldResume)
+    lastDiagnostic = "AVAudioSession media services were reset; current media reloading"
+    publish()
   }
 
   private func trackDescriptions(_ options: [AVMediaSelectionOption], fallback: [AVPlayerItemTrack]) -> [[String: Any]] {
@@ -1264,7 +1371,7 @@ final class PlaybackService: NSObject {
       try activateAudioSession()
     } catch {
       lastDiagnostic = error.localizedDescription
-      if !interrupted { fail("audio_permission_failed"); return }
+      audioRecoveryPending = wantsPlayback
       errorMessage = ""
     }
     cancelSeeks()
