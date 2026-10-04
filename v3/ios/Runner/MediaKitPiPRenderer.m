@@ -46,7 +46,7 @@ static void LeeMediaKitPiPUpdate(void *context) {
                                          error:(NSError **)error {
     if (![AVPictureInPictureController isPictureInPictureSupported]) {
         if (error) *error = [NSError errorWithDomain:LeeMediaKitPiPErrorDomain code:1
-            userInfo:@{NSLocalizedDescriptionKey: @"当前设备不支持画中画"}];
+            userInfo:@{NSLocalizedDescriptionKey: @"Picture in Picture is not supported"}];
         return nil;
     }
     if ((self = [super init])) {
@@ -69,7 +69,7 @@ static void LeeMediaKitPiPUpdate(void *context) {
         if (status < 0 || !_renderContext) {
             [_displayLayer removeFromSuperlayer];
             if (error) *error = [NSError errorWithDomain:LeeMediaKitPiPErrorDomain code:2
-                userInfo:@{NSLocalizedDescriptionKey: @"无法接管兼容引擎的视频输出"}];
+                userInfo:@{NSLocalizedDescriptionKey: @"Unable to take over compatibility-engine video output"}];
             return nil;
         }
         mpv_render_context_set_update_callback(_renderContext, LeeMediaKitPiPUpdate,

@@ -546,8 +546,18 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (value != null) await m.configure({'sleepMinutes': value});
   }
   Future<void> playbackInfo() async {
-    String text = '';
-    if (!await m.command('playbackInfo', onValue: (value) { text = value as String; }) || !mounted) return;
+    Map<String, dynamic>? info;
+    String? legacyText;
+    if (!await m.command('playbackInfo', onValue: (value) {
+      if (value is Map) info = Map<String, dynamic>.from(value);
+      if (value is String) legacyText = value;
+    }) ||
+        !mounted ||
+        (info == null && legacyText == null)) return;
+    final localizations = AppLocalizations.of(context);
+    final text = info == null
+      ? localizations.text(legacyText!)
+      : localizations.playbackInfo(info!);
     await showLeiDialog<void>(context: context, title: null, platformViewBackdrop: true,
       content: Column(mainAxisSize: MainAxisSize.min, children: [
         Row(children: [
@@ -560,7 +570,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
             semanticLabel: AppLocalizations.of(context).text('关闭播放信息')),
         ]),
         const SizedBox(height: 8),
-        SingleChildScrollView(child: LSelectableText(text)),
+        SingleChildScrollView(child: SelectableText(text)),
       ]),
       actions: [
         GlassDialogAction(label: '复制信息', onPressed: () async {
@@ -674,7 +684,8 @@ class _PlaybackPageState extends State<PlaybackPage> {
           message: [
             '${m.number('index').toInt() + 1} / ${m.queue.length} · ${m.state['continuous'] == false ? '播完当前停止' : modes[m.state['mode']] ?? '文件夹循环'}',
             if (m.number('introSkipped') > 0) '已跳过片头 ${timeLabel(m.number('introSkipped'))} · 可拖回开头查看',
-            if ((m.state['engineNotice'] as String? ?? '').isNotEmpty) '${m.state['engineNotice']}',
+            if ((m.state['engineNotice'] as String? ?? '').isNotEmpty)
+              AppLocalizations.of(context).message(AppMessage(m.state['engineNotice'] as String)),
             if ((m.state['subtitleName'] as String? ?? '').isNotEmpty) '字幕：${m.state['subtitleName']}',
           ].join('\n\n'),
           actions: [GlassDialogAction(label: '关闭',
@@ -817,7 +828,8 @@ class _PlaybackPageState extends State<PlaybackPage> {
             const SizedBox(height: 16),
             LText('暂时无法播放', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 12),
-            LSelectableText('${m.state['error']}', textAlign: TextAlign.center),
+            SelectableText(AppLocalizations.of(context).message(AppMessage('${m.state['error']}')),
+              textAlign: TextAlign.center),
             const SizedBox(height: 20),
             Wrap(spacing: 12, runSpacing: 12, alignment: WrapAlignment.center, children: [
               LeiGlassButton(label: '重试播放', icon: Icons.refresh,

@@ -474,6 +474,17 @@ void showLeiToast(BuildContext context, String message) {
   );
 }
 
+void showLeiMessageToast(BuildContext context, AppMessage message) {
+  GlassToast.show(
+    context,
+    message: AppLocalizations.of(context).message(message),
+    type: GlassToastType.info,
+    quality: GlassQuality.minimal,
+    position: GlassToastPosition.top,
+    duration: const Duration(seconds: 4),
+  );
+}
+
 Future<T?> showLeiSheet<T>({
   required BuildContext context,
   required WidgetBuilder builder,

@@ -6,24 +6,22 @@ import StoreKit
 final class DeveloperTipPurchase {
   private struct Tip {
     let id: String
-    let name: String
   }
 
   private static let tips = [
-    Tip(id: "vip.ichiki.javalee.leeplayer.tip.small", name: "一份鼓励"),
-    Tip(id: "vip.ichiki.javalee.leeplayer.tip.medium", name: "暖心支持"),
-    Tip(id: "vip.ichiki.javalee.leeplayer.tip.large", name: "特别支持"),
-    Tip(id: "vip.ichiki.javalee.leeplayer.tip.xlarge", name: "大力支持"),
-    Tip(id: "vip.ichiki.javalee.leeplayer.tip.premium", name: "顶级鼓励"),
-    Tip(id: "vip.ichiki.javalee.leeplayer.tip.strong", name: "夯"),
+    Tip(id: "vip.ichiki.javalee.leeplayer.tip.small"),
+    Tip(id: "vip.ichiki.javalee.leeplayer.tip.medium"),
+    Tip(id: "vip.ichiki.javalee.leeplayer.tip.large"),
+    Tip(id: "vip.ichiki.javalee.leeplayer.tip.xlarge"),
+    Tip(id: "vip.ichiki.javalee.leeplayer.tip.premium"),
+    Tip(id: "vip.ichiki.javalee.leeplayer.tip.strong"),
   ]
   private static let deliveredKey = "developer_tip.delivered_transaction_ids"
 
   private let channel: FlutterMethodChannel
   private var products: [String: Product] = [:]
   private var revision = 0
-  private var message: String?
-  private var thanks: String?
+  private var messageCode: String?
   private var celebration: [String: String]?
   private var operationInProgress = false
   private var updatesTask: Task<Void, Never>?
@@ -34,7 +32,7 @@ final class DeveloperTipPurchase {
     channel.setMethodCallHandler { [weak self] call, result in
       Task { @MainActor [weak self] in
         guard let self else {
-          result(FlutterError(code: "unavailable", message: "打赏服务暂不可用", details: nil))
+          result(FlutterError(code: "purchase_service_unavailable", message: nil, details: nil))
           return
         }
         await self.handle(call, result: result)
@@ -64,8 +62,7 @@ final class DeveloperTipPurchase {
       "canPay": AppStore.canMakePayments,
       "products": listed,
     ]
-    if let message { state["message"] = message }
-    if let thanks { state["thanks"] = thanks }
+    if let messageCode { state["messageCode"] = messageCode }
     if let celebration { state["celebration"] = celebration }
     return state
   }
@@ -95,10 +92,8 @@ final class DeveloperTipPurchase {
     switch value {
     case .verified(let transaction):
       guard isTip(transaction) else { return }
-      message = nil
+      messageCode = nil
       if recordDelivery(transaction.id) {
-        let name = Self.tips.first(where: { $0.id == transaction.productID })?.name ?? "支持"
-        thanks = "感谢你的「\(name)」！"
         celebration = [
           "productId": transaction.productID,
           "transactionId": String(transaction.id),
@@ -108,7 +103,7 @@ final class DeveloperTipPurchase {
       await transaction.finish()
     case .unverified(let transaction, _):
       guard isTip(transaction) else { return }
-      message = "购买验证失败，请稍后重试"
+      messageCode = "purchase_verification_failed"
       publish()
     }
   }
@@ -122,11 +117,11 @@ final class DeveloperTipPurchase {
       return (product.id, product)
     })
     if products.isEmpty {
-      message = "商品暂不可用，请稍后重新加载"
+      messageCode = "purchase_products_unavailable"
     } else if !AppStore.canMakePayments {
-      message = "当前设备不允许购买"
+      messageCode = "purchase_restricted"
     } else {
-      message = nil
+      messageCode = nil
     }
   }
 
@@ -136,50 +131,54 @@ final class DeveloperTipPurchase {
       result(snapshot())
     case "loadProducts":
       do {
-        thanks = nil
         celebration = nil
         try await loadProducts()
         publish()
         result(snapshot())
       } catch {
         products = [:]
-        message = "商品加载失败，请检查网络后重试"
+        messageCode = "purchase_products_load_failed"
         publish()
-        result(FlutterError(code: "products", message: message, details: String(describing: error)))
+        result(FlutterError(
+          code: "purchase_products_load_failed",
+          message: nil,
+          details: ["technicalDetail": String(describing: error)]))
       }
     case "purchase":
       guard !operationInProgress else {
-        result(FlutterError(code: "busy", message: "正在处理购买，请稍候", details: nil))
+        result(FlutterError(code: "purchase_busy", message: nil, details: nil))
         return
       }
       guard let id = call.arguments as? String,
         let product = products[id],
         Self.tips.contains(where: { $0.id == id }) else {
-        result(FlutterError(code: "product", message: "请先重新加载商品", details: nil))
+        result(FlutterError(code: "purchase_product_invalid", message: nil, details: nil))
         return
       }
       guard AppStore.canMakePayments else {
-        result(FlutterError(code: "restricted", message: "当前设备不允许购买", details: nil))
+        result(FlutterError(code: "purchase_restricted", message: nil, details: nil))
         return
       }
       operationInProgress = true
       defer { operationInProgress = false }
-      message = nil
-      thanks = nil
+      messageCode = nil
       celebration = nil
       do {
         switch try await product.purchase() {
         case .success(let value): await receive(value)
-        case .pending: message = "购买待批准，批准后会自动完成感谢"
-        case .userCancelled: message = "已取消打赏"
-        @unknown default: message = "购买尚未完成，请稍后重试"
+        case .pending: messageCode = "purchase_pending"
+        case .userCancelled: messageCode = "purchase_cancelled"
+        @unknown default: messageCode = "purchase_incomplete"
         }
         publish()
         result(snapshot())
       } catch {
-        message = "购买失败，请稍后重试"
+        messageCode = "purchase_failed"
         publish()
-        result(FlutterError(code: "purchase", message: message, details: String(describing: error)))
+        result(FlutterError(
+          code: "purchase_failed",
+          message: nil,
+          details: ["technicalDetail": String(describing: error)]))
       }
     default:
       result(FlutterMethodNotImplemented)

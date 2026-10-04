@@ -73,7 +73,7 @@ class DeveloperTipController extends ChangeNotifier
   bool _canPay = false;
   bool _disposed = false;
   int _revision = -1;
-  String? _message;
+  AppMessage? _message;
   String? _processingProductId;
   DeveloperTipCelebration? _celebration;
 
@@ -84,7 +84,7 @@ class DeveloperTipController extends ChangeNotifier
   bool get busy => _busy;
   bool get supported => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
   bool get canPay => _canPay;
-  String? get message => _message;
+  AppMessage? get message => _message;
   String? get processingProductId => _processingProductId;
   DeveloperTipCelebration? get celebration => _celebration;
 
@@ -98,7 +98,13 @@ class DeveloperTipController extends ChangeNotifier
     if (revision < _revision) return;
     _revision = revision;
     _canPay = value['canPay'] == true;
-    _message = value['message'] as String?;
+    final messageCode = value['messageCode'] as String?;
+    final legacyMessage = value['message'] as String?;
+    _message = messageCode == null
+        ? legacyMessage == null
+              ? null
+              : AppMessage('legacy_message', fallback: legacyMessage)
+        : AppMessage(messageCode);
     _celebration = DeveloperTipCelebration.fromNative(value['celebration']);
     final rawProducts = value['products'];
     if (rawProducts is List) {
@@ -125,9 +131,24 @@ class DeveloperTipController extends ChangeNotifier
   }
 
   void _record(Object error) {
-    _message = error is PlatformException
-        ? error.message ?? '打赏服务暂不可用，请稍后重试'
-        : '打赏服务暂不可用，请稍后重试';
+    if (error is PlatformException) {
+      final details = error.details;
+      _message = details is Map
+          ? AppMessage.fromMap(<dynamic, dynamic>{
+              ...details,
+              'code': error.code,
+            }, fallback: error.message)
+          : AppMessage(
+              error.code,
+              fallback: error.message,
+              technicalDetail: details == null ? null : '$details',
+            );
+    } else {
+      _message = AppMessage(
+        'purchase_service_unavailable',
+        technicalDetail: '$error',
+      );
+    }
     _notify();
   }
 
@@ -135,7 +156,7 @@ class DeveloperTipController extends ChangeNotifier
     if (_disposed) return;
     if (!supported) {
       _initialized = true;
-      _message = '请在 iPhone 或 iPad 上支持开发者';
+      _message = const AppMessage('purchase_ios_only');
       _notify();
       return;
     }
@@ -339,16 +360,21 @@ class _TipProducts extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final waiting = !controller.initialized || controller.loading;
+    final localizations = AppLocalizations.of(context);
     final status = waiting
-        ? '正在加载商品…'
+        ? localizations.text('正在加载商品…')
         : controller.products.isEmpty
-        ? controller.message ?? '暂未获取到商品，请稍后重试'
+        ? controller.message == null
+              ? localizations.text('暂未获取到商品，请稍后重试')
+              : localizations.message(controller.message!)
         : controller.products.length <
               DeveloperTipController.displayOrder.length
-        ? '部分商品暂不可用，请稍后重试。'
+        ? localizations.text('部分商品暂不可用，请稍后重试。')
         : !controller.canPay
-        ? '当前设备不允许购买。'
-        : controller.message;
+        ? localizations.text('当前设备不允许购买。')
+        : controller.message == null
+        ? null
+        : localizations.message(controller.message!);
     return Column(
       children: [
         if (status != null) ...[
@@ -364,7 +390,7 @@ class _TipProducts extends StatelessWidget {
                       const GlassProgressIndicator.circular(size: 22),
                       const SizedBox(width: 10),
                     ],
-                    Expanded(child: LText(status)),
+                    Expanded(child: Text(status)),
                   ],
                 ),
                 if (!waiting &&

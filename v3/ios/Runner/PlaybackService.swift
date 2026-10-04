@@ -45,7 +45,7 @@ final class LeeMediaKitEngine {
       if !success {
         self.recordDiagnostic("\(method) rejected")
         if method == "open" || method == "play" {
-          self.failure = "media_kit \(method == "open" ? "打开" : "播放")失败，请重新打开媒体"
+          self.failure = method == "open" ? "media_kit_open_failed" : "media_kit_play_failed"
           self.changed?()
         }
       }
@@ -186,6 +186,7 @@ final class PlaybackService: NSObject {
   private var mediaKitPiPRequestID: String?
   private var mediaKitPiPPreparationTimeout: DispatchWorkItem?
   private var mediaKitPiPRestoring = false
+  private var mediaKitPiPRestoreTimeout: DispatchWorkItem?
   private var retiringPiP: [ObjectIdentifier: (AVPictureInPictureController, MediaKitPiPRenderer?)] = [:]
 
   private func discardAVPlayerPiP() {
@@ -300,9 +301,11 @@ final class PlaybackService: NSObject {
   private var wantsPlayback = false
   private var interrupted = false
   private var resumeAfterInterruption = false
+  // iOS 15/16 do not expose routeDisconnected; correlate the paired notifications briefly.
+  private var routeLossRecoveryDeadline = 0.0
   private var loading = false
   private var generation = 0
-  private let assetPreparation = DispatchQueue(label: "雷player.timeline", qos: .userInitiated)
+  private var assetPreparationTask: Task<Void, Never>?
   private var timelineReady = false
   private var timelineOrigin = 0.0
   private var fallbackAudio: [AVPlayerItemTrack] = []
@@ -375,9 +378,7 @@ final class PlaybackService: NSObject {
     let center = NotificationCenter.default
     notifications.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] in self?.interruption($0) })
     notifications.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
-      if (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue {
-        self?.pause(); self?.errorMessage = "音频设备已断开，点击播放继续"; self?.publish()
-      }
+      self?.routeChanged(note)
     })
     notifications.append(center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
       self?.suspendAVPlayerPresentationForBackground(lifecycleTransition: true)
@@ -392,7 +393,7 @@ final class PlaybackService: NSObject {
       self?.tick()
     })
     notifications.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
-      self?.pause(); self?.errorMessage = "音频服务已重置，请重新选择课时播放"; self?.publish()
+      self?.pause(); self?.errorMessage = "audio_service_reset"; self?.publish()
     })
     notifications.append(center.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] note in
       guard let self = self, let item = note.object as? AVPlayerItem, item === self.player.currentItem else { return }
@@ -400,15 +401,18 @@ final class PlaybackService: NSObject {
     })
     notifications.append(center.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] note in
       guard let self = self, let item = note.object as? AVPlayerItem, item === self.player.currentItem else { return }
-      self.fail(item.error?.localizedDescription ?? "媒体播放中断，文件可能损坏")
+      if let error = item.error { self.lastDiagnostic = error.localizedDescription }
+      self.fail("media_playback_failed")
     })
     setupRemoteCommands()
   }
 
   deinit {
+    assetPreparationTask?.cancel()
     sleepTimer?.invalidate()
     heartbeat?.invalidate()
     openingTimeout?.cancel(); seekTimeout?.cancel()
+    mediaKitPiPRestoreTimeout?.cancel()
     cancelPendingAVPlayerPiP()
     mediaKitPiP?.stop()
     mediaKit?.stopPlayback()
@@ -446,57 +450,58 @@ final class PlaybackService: NSObject {
     updateNowPlaying()
   }
 
-  func playbackInfo() -> String {
-    var lines = ["播放引擎：\(mediaKit == nil ? "AVPlayer" : "media_kit / libmpv")",
-                 "时长：\(Int(duration)) 秒", "可定位：\((mediaKit?.seekable ?? timelineReady) ? "是" : "否")"]
+  func playbackInfo() -> [String: Any] {
+    var result: [String: Any] = [
+      "engine": mediaKit == nil ? "AVPlayer" : "media_kit / libmpv",
+      "durationSeconds": Int(duration),
+      "seekable": mediaKit?.seekable ?? timelineReady,
+      "generation": generation,
+    ]
     if let mediaKit = mediaKit {
       let info = mediaKit.diagnostics
-      lines.append("解码策略：\(info["decoder"] ?? "自动选择")")
-      lines.append("同步策略：libmpv 默认；音频：PCM")
-      lines.append("倍速：设置 \(rate)；引擎 \(info["actualRate"] ?? "未知")")
+      result["decoderCode"] = info["decoderCode"] ?? "automatic_hardware_decode"
+      result["syncPolicy"] = "libmpv / PCM"
+      result["configuredRate"] = rate
+      if let actualRate = info["actualRate"] { result["actualRate"] = actualRate }
       let session = AVAudioSession.sharedInstance()
-      let output = session.currentRoute.outputs.map { "\($0.portName)（\($0.portType.rawValue)）" }.joined(separator: "、")
-      lines.append("音频设备：\(output.isEmpty ? "未连接" : output)；采样率：\(Int(session.sampleRate)) Hz")
-      lines.append("libmpv 版本：\(info["version"] ?? "未知")")
-      lines.append("实际硬解：\(info["hwdec"] ?? "未知")；视频输出：\(info["vo"] ?? "未知")")
-      lines.append("解码丢帧：\(info["decoderDrops"] ?? "未知")；输出丢帧：\(info["outputDrops"] ?? "未知")")
-      let age = (info["sessionAge"] as? NSNumber)?.doubleValue ?? 0
-      lines.append(String(format: "本次引擎运行 %.1f 秒；会话 %d", age, generation))
-      lines.append("实际音视频输出时间戳及音画偏差：未测量；定位完成不代表首帧显示或同步完成")
+      result["audioOutput"] = session.currentRoute.outputs.map {
+        "\($0.portName) (\($0.portType.rawValue))"
+      }.joined(separator: ", ")
+      result["sampleRate"] = Int(session.sampleRate)
+      for key in ["version", "hwdec", "vo", "decoderDrops", "outputDrops"] {
+        if let value = info[key] { result[key] = value }
+      }
+      result["sessionAge"] = (info["sessionAge"] as? NSNumber)?.doubleValue ?? 0
+      result["outputTimingMeasured"] = false
       if let events = info["controlEvents"] as? [String], !events.isEmpty {
-        lines.append("最近控制事件（原生会话起点；下方引擎日志以 Dart 引擎创建为起点）：")
-        lines.append(events.joined(separator: "\n"))
+        result["controlEvents"] = events
       }
       if let errors = info["errors"] as? [String], !errors.isEmpty {
-        lines.append("以下为历史引擎日志，[秒数]表示记录时间：")
-        lines.append(errors.joined(separator: "\n"))
+        result["engineLogs"] = errors
       }
     }
     let state = snapshot()
-    for kind in ["audio", "subtitle"] {
-      let rows = state["\(kind)Tracks"] as? [[String: Any]] ?? []
-      let selected = (state["\(kind)Track"] as? NSNumber)?.intValue ?? -1
-      lines.append("\(kind == "audio" ? "音轨" : "字幕")：\(rows.count) 条")
-      for row in rows {
-        let index = (row["index"] as? NSNumber)?.intValue ?? -1
-        lines.append("\(index == selected ? "✓" : "○") \(row["name"] ?? "轨道") · \(row["details"] ?? "") · id=\(row["id"] ?? index)")
-      }
-    }
-    if !lastDiagnostic.isEmpty { lines.append(lastDiagnostic) }
-    return lines.joined(separator: "\n")
+    result["audioTracks"] = state["audioTracks"] as? [[String: Any]] ?? []
+    result["audioTrack"] = state["audioTrack"] ?? -1
+    result["subtitleTracks"] = state["subtitleTracks"] as? [[String: Any]] ?? []
+    result["subtitleTrack"] = state["subtitleTrack"] ?? -1
+    if !lastDiagnostic.isEmpty { result["technicalDetail"] = lastDiagnostic }
+    return result
   }
 
   func open(paths: [String], selected: Int, resume: Bool) throws {
-    guard !paths.isEmpty, paths.indices.contains(selected) else { throw LibraryFailure.message("播放队列为空") }
+    guard !paths.isEmpty, paths.indices.contains(selected) else { throw LibraryFailure.app("playback_queue_empty") }
     for path in paths { _ = try library.url(path) }
     persist()
     queue = paths; index = selected
     load(resume: resume)
   }
 
-  private func load(resume: Bool) {
+  private func load(resume: Bool, autoplay: Bool = true) {
     guard let path = currentPath else { return }
-    finishTrackSelection("媒体已重新打开，请重新选择轨道")
+    assetPreparationTask?.cancel()
+    assetPreparationTask = nil
+    finishTrackSelection("track_selection_stale")
     cancelIntroDetection()
     cancelSeeks()
     openingTimeout?.cancel()
@@ -509,18 +514,18 @@ final class PlaybackService: NSObject {
     introSkipped = 0
     generation += 1
     let token = generation
-    player.pause(); timelineReady = false; loading = true; wantsPlayback = true; errorMessage = ""
+    player.pause(); timelineReady = false; loading = true; wantsPlayback = autoplay; errorMessage = ""
     observations = Array(observations.prefix(1))
     player.replaceCurrentItem(with: nil)
     aPoint = nil; bPoint = nil
     cues = []; subtitleName = ""; subtitleText = ""; surface?.caption.text = ""; surface?.caption.isHidden = true
     audioOptions = []; subtitleOptions = []; selectedAudio = -1; selectedSubtitle = -1
-    guard let transport = mediaKitTransport else { fail("播放通道尚未就绪"); return }
+    guard let transport = mediaKitTransport else { fail("playback_channel_unavailable"); return }
     scheduleOpenTimeout(token: token)
     publish()
     transport("release", [:]) { [weak self] success in
       guard let self = self, self.generation == token else { return }
-      guard success else { self.fail("无法释放上一播放引擎，请重新启动应用"); return }
+      if !success { self.lastDiagnostic = "media_kit_release_timeout" }
       self.loadPrepared(path: path, resume: resume, token: token)
     }
   }
@@ -528,7 +533,7 @@ final class PlaybackService: NSObject {
   private func loadPrepared(path: String, resume: Bool, token: Int) {
     do {
       let url = try library.url(path)
-      guard FileManager.default.fileExists(atPath: url.path) else { throw LibraryFailure.message("视频已移动或删除，请刷新课程库") }
+      guard FileManager.default.fileExists(atPath: url.path) else { throw LibraryFailure.app("media_missing") }
       timelineReady = false
       timelineOrigin = 0
       fallbackAudio = []; fallbackSubtitles = []
@@ -542,22 +547,35 @@ final class PlaybackService: NSObject {
       }
       attachAVPlayerPresentationIfAllowed()
       scheduleOpenTimeout(token: token)
-      assetPreparation.async { [weak self] in
+      let task = Task.detached(priority: .userInitiated) { [weak self] in
         do {
-          let prepared = try PlaybackTimeline.prepare(url: url)
+          let prepared = try await PlaybackTimeline.prepare(url: url)
+          try Task.checkCancellation()
           DispatchQueue.main.async {
             guard let self = self, self.generation == token else { return }
+            self.assetPreparationTask = nil
             self.install(prepared.asset, origin: prepared.origin, url: url, path: path, resume: resume, token: token)
           }
+        } catch is CancellationError {
+          return
         } catch {
           DispatchQueue.main.async {
             guard let self = self, self.generation == token else { return }
+            self.assetPreparationTask = nil
             self.fallbackToMediaKit(url: url, resume: resume, token: token, error: error)
           }
         }
       }
+      assetPreparationTask = task
       publish()
-    } catch { fail(error.localizedDescription) }
+    } catch {
+      if let failure = error as? LibraryFailure {
+        fail(failure.code)
+      } else {
+        lastDiagnostic = error.localizedDescription
+        fail("media_playback_failed")
+      }
+    }
   }
 
   private func install(_ asset: AVAsset, origin: Double, url: URL, path: String, resume: Bool, token: Int) {
@@ -569,7 +587,7 @@ final class PlaybackService: NSObject {
       DispatchQueue.main.async {
         guard let self = self, self.generation == token, self.mediaKit == nil else { return }
         if item.status == .failed {
-          self.fallbackToMediaKit(url: url, resume: resume, token: token, error: item.error ?? LibraryFailure.message("iOS 不支持此媒体")); return
+          self.fallbackToMediaKit(url: url, resume: resume, token: token, error: item.error ?? LibraryFailure.app("media_unsupported")); return
         }
         guard item.status == .readyToPlay, !prepared else { return }
         prepared = true
@@ -646,7 +664,7 @@ final class PlaybackService: NSObject {
         guard let self = self, self.introToken == token, self.generation == itemGeneration else { return }
         self.loading = false
         if !finished { self.introSkipped = 0; self.endIntroBackgroundTask(); return }
-        if self.wantsPlayback && !self.interrupted { self.play() }
+        if self.wantsPlayback { self.play() }
         self.endIntroBackgroundTask()
         self.persist(); self.publish()
       }
@@ -659,19 +677,24 @@ final class PlaybackService: NSObject {
     if seekFault || (mediaKit?.failure.isEmpty == false) { load(resume: true); return }
     if !timelineReady || loading || isSeeking || scrubbing { wantsPlayback = true; publish(); return }
     if let deadline = sleepUntil, Date() >= deadline { sleepTimer?.invalidate(); sleepTimer = nil; sleepUntil = nil; pause(); return }
-    guard !interrupted else { errorMessage = "通话或其他音频正在占用，结束后再继续"; publish(); return }
     if player.currentItem?.status == .failed { load(resume: true); return }
+    wantsPlayback = true
     do {
-      let session = AVAudioSession.sharedInstance()
-      if session.category != .playback || session.mode != .moviePlayback || !session.categoryOptions.isEmpty {
-        try session.setCategory(.playback, mode: .moviePlayback, options: [])
-      }
-      try session.setActive(true)
-      wantsPlayback = true; errorMessage = ""
+      try activateAudioSession()
+      errorMessage = ""
       if duration > 0 && position >= duration - 0.1 { load(resume: false); return }
       resumeEngine()
       publish()
-    } catch { fail("暂时无法取得音频播放权限：\(error.localizedDescription)") }
+    } catch {
+      lastDiagnostic = error.localizedDescription
+      if interrupted {
+        errorMessage = ""
+        pauseEngine()
+        publish()
+      } else {
+        fail("audio_permission_failed")
+      }
+    }
   }
 
   func pause() {
@@ -690,7 +713,7 @@ final class PlaybackService: NSObject {
     enqueueSeek(seconds, precise: true) { [weak self] finished in
       guard let self = self else { completion(false); return }
       if finished {
-        if self.wantsPlayback && !self.interrupted && !self.scrubbing { self.play() }
+        if self.wantsPlayback && !self.scrubbing { self.play() }
         self.persist()
       }
       self.publish(); completion(finished)
@@ -733,7 +756,7 @@ final class PlaybackService: NSObject {
       self.mediaKit?.recordDiagnostic(String(format: "seek finish session=%d request=%d success=%@ superseded=%@ after=%.3f elapsed=%.3f", token, request.id, finished ? "yes" : "no", superseded ? "yes" : "no", self.position, ProcessInfo.processInfo.systemUptime - startedAt))
       request.done(finished && !superseded)
       if !finished && !superseded {
-        self.fail("无法完成定位，请点击重试重新打开媒体")
+        self.fail("seek_failed")
         return
       }
       self.runNextSeek(); self.publish()
@@ -743,7 +766,7 @@ final class PlaybackService: NSObject {
       self.mediaKit?.recordDiagnostic("seek timeout session=\(token) request=\(request.id)")
       self.seekFault = true
       self.cancelSeeks()
-      self.fail("定位超时，请点击重试重新打开媒体")
+      self.fail("seek_timeout")
     }
     seekTimeout = timeout
     DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: timeout)
@@ -875,7 +898,7 @@ final class PlaybackService: NSObject {
       switch action {
       case "a": aPoint = position; bPoint = nil
       case "b":
-        guard let a = aPoint, position > a + 0.5 else { throw LibraryFailure.message("请先设置 A 点，B 点需在 A 点至少半秒之后") }
+        guard let a = aPoint, position > a + 0.5 else { throw LibraryFailure.app("ab_repeat_invalid") }
         bPoint = position
         restartAt = a
       default: aPoint = nil; bPoint = nil
@@ -934,8 +957,9 @@ final class PlaybackService: NSObject {
   }
 
   private func fail(_ message: String) {
-    finishTrackSelection("播放状态已变化，请重新选择轨道")
+    finishTrackSelection("track_selection_stale")
     cancelIntroDetection()
+    assetPreparationTask?.cancel(); assetPreparationTask = nil
     openingTimeout?.cancel(); cancelSeeks(); generation += 1
     seekFault = true; timelineReady = false
     loading = false; wantsPlayback = false; pauseEngine(); errorMessage = message; publish()
@@ -945,15 +969,75 @@ final class PlaybackService: NSObject {
     guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
           let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
     if type == .began {
+      let routeDisconnected: Bool
+      if #available(iOS 17.0, *),
+        let reasonRaw = note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt,
+        let reason = AVAudioSession.InterruptionReason(rawValue: reasonRaw) {
+        routeDisconnected = reason == .routeDisconnected
+      } else {
+        routeDisconnected = false
+      }
+      let recentlyReturnedToSpeaker =
+        ProcessInfo.processInfo.systemUptime <= routeLossRecoveryDeadline &&
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains {
+          $0.portType == .builtInSpeaker
+        }
+      if routeDisconnected || recentlyReturnedToSpeaker {
+        interrupted = false; resumeAfterInterruption = false; wantsPlayback = false
+        scrubbing = false; errorMessage = ""
+        pauseEngine(); persist(); publish()
+        return
+      }
       resumeAfterInterruption = wantsPlayback
-      interrupted = true; scrubbing = false; pauseEngine(); persist(); publish()
+      interrupted = true; scrubbing = false; errorMessage = ""
+      pauseEngine(); persist(); publish()
     } else {
       interrupted = false
       let options = AVAudioSession.InterruptionOptions(rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
       let resume = resumeAfterInterruption && wantsPlayback && autoResume && options.contains(.shouldResume)
       resumeAfterInterruption = false
-      if resume { play() } else { wantsPlayback = false; errorMessage = "音频中断已结束，点击播放继续"; publish() }
+      errorMessage = ""
+      if resume { play() } else { wantsPlayback = false; publish() }
     }
+  }
+
+  private func routeChanged(_ note: Notification) {
+    guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+      let reason = AVAudioSession.RouteChangeReason(rawValue: raw),
+      reason == .oldDeviceUnavailable else { return }
+    cancelIntroDetection()
+    wantsPlayback = false; resumeAfterInterruption = false; scrubbing = false
+    pauseEngine(); errorMessage = ""
+
+    let wirelessOrHeadphones: [AVAudioSession.Port] = [
+      .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .headphones,
+    ]
+    let previousRoute = note.userInfo?[AVAudioSessionRouteChangePreviousRouteKey]
+      as? AVAudioSessionRouteDescription
+    let removedPrivateOutput = previousRoute?.outputs.contains {
+      wirelessOrHeadphones.contains($0.portType)
+    } == true
+    let switchedToSpeaker = AVAudioSession.sharedInstance().currentRoute.outputs.contains {
+      $0.portType == .builtInSpeaker
+    }
+    if removedPrivateOutput && switchedToSpeaker {
+      interrupted = false
+      routeLossRecoveryDeadline = ProcessInfo.processInfo.systemUptime + 2
+    } else {
+      routeLossRecoveryDeadline = 0
+    }
+    persist(); publish()
+  }
+
+  private func activateAudioSession() throws {
+    let session = AVAudioSession.sharedInstance()
+    if session.category != .playback || session.mode != .moviePlayback || !session.categoryOptions.isEmpty {
+      try session.setCategory(.playback, mode: .moviePlayback, options: [])
+    }
+    try session.setActive(true)
+    interrupted = false
+    resumeAfterInterruption = false
+    routeLossRecoveryDeadline = 0
   }
 
   private func trackDescriptions(_ options: [AVMediaSelectionOption], fallback: [AVPlayerItemTrack]) -> [[String: Any]] {
@@ -962,7 +1046,7 @@ final class PlaybackService: NSObject {
     }
     return fallback.enumerated().map { index, itemTrack in
       let language = itemTrack.assetTrack?.extendedLanguageTag ?? itemTrack.assetTrack?.languageCode ?? "und"
-      return ["index": index, "name": "轨道 \(index + 1) · \(language)"]
+      return ["index": index, "name": "Track \(index + 1) · \(language)"]
     }
   }
 
@@ -994,16 +1078,16 @@ final class PlaybackService: NSObject {
 
   func requestTrack(kind: String, index: Int, id: String?, session: Int, completion: @escaping (String?) -> Void) throws {
     guard session == generation, timelineReady, !seekFault, currentPath != nil else {
-      throw LibraryFailure.message("媒体已变化或尚未就绪，请重新打开轨道列表")
+      throw LibraryFailure.app("track_selection_stale")
     }
     guard ["audio", "subtitle"].contains(kind), trackSelection == nil else {
-      throw LibraryFailure.message("轨道请求无效或正在切换，请稍后重试")
+      throw LibraryFailure.app("track_request_invalid")
     }
     let disabled = kind == "subtitle" && index == -1 && id == nil
-    guard disabled || index >= 0 else { throw LibraryFailure.message("轨道请求无效，请重新选择") }
+    guard disabled || index >= 0 else { throw LibraryFailure.app("track_request_invalid") }
     if let mediaKit = mediaKit {
-      guard disabled || id?.isEmpty == false else { throw LibraryFailure.message("轨道身份已失效，请重新打开轨道列表") }
-      guard mediaKit.select(kind: kind, trackID: disabled ? nil : id) else { throw LibraryFailure.message("轨道已变化，请重新选择") }
+      guard disabled || id?.isEmpty == false else { throw LibraryFailure.app("track_selection_stale") }
+      guard mediaKit.select(kind: kind, trackID: disabled ? nil : id) else { throw LibraryFailure.app("track_selection_stale") }
       mediaKit.recordDiagnostic("track request session=\(generation) kind=\(kind) id=\(id ?? "off")")
     } else {
       try selectTrack(kind: kind, index: index)
@@ -1035,7 +1119,7 @@ final class PlaybackService: NSObject {
     }
     guard let request = trackSelection else { return }
     guard request.generation == generation, timelineReady, !seekFault else {
-      finishTrackSelection("媒体已变化，请重新选择轨道"); return
+      finishTrackSelection("track_selection_stale"); return
     }
     let confirmed: Bool
     if let mediaKit = mediaKit {
@@ -1047,13 +1131,13 @@ final class PlaybackService: NSObject {
     }
     if confirmed { finishTrackSelection(nil) }
     else if ProcessInfo.processInfo.systemUptime >= request.deadline {
-      finishTrackSelection("未确认轨道切换，请查看实际选中项后重试")
+      finishTrackSelection("track_switch_unconfirmed")
     }
   }
 
   private func selectTrack(kind: String, index: Int) throws {
     if let mediaKit = mediaKit {
-      guard mediaKit.select(kind: kind, index: index) else { throw LibraryFailure.message("音轨或字幕已变化，请重新选择") }
+      guard mediaKit.select(kind: kind, index: index) else { throw LibraryFailure.app("track_selection_stale") }
       if kind == "subtitle" { cues = []; subtitleName = ""; surface?.caption.text = ""; surface?.caption.isHidden = true }
       publish(); return
     }
@@ -1061,7 +1145,7 @@ final class PlaybackService: NSObject {
     let options = kind == "audio" ? audioOptions : subtitleOptions
     let fallback = kind == "audio" ? fallbackAudio : fallbackSubtitles
     let count = options.isEmpty ? fallback.count : options.count
-    guard index == -1 || (0..<count).contains(index) else { throw LibraryFailure.message("音轨或字幕已变化，请重新选择") }
+    guard index == -1 || (0..<count).contains(index) else { throw LibraryFailure.app("track_selection_stale") }
     if kind == "audio" && index < 0 { return }
     if !options.isEmpty, let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: kind == "audio" ? .audible : .legible) {
       item.select(index == -1 ? nil : options[index], in: group)
@@ -1074,16 +1158,16 @@ final class PlaybackService: NSObject {
   }
 
   func loadSubtitle(path: String) throws {
-    guard trackSelection == nil else { throw LibraryFailure.message("正在切换轨道，请稍后加载字幕") }
+    guard trackSelection == nil else { throw LibraryFailure.app("subtitle_switch_busy") }
     let url = try library.url(path)
     let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-    guard size <= 10 * 1024 * 1024 else { throw LibraryFailure.message("字幕文件过大，请选择小于 10 MB 的字幕文件") }
+    guard size <= 10 * 1024 * 1024 else { throw LibraryFailure.app("subtitle_too_large") }
     if let mediaKit = mediaKit {
-      guard mediaKit.addSubtitle(url: url) else { throw LibraryFailure.message("MediaKit 无法加载该字幕") }
+      guard mediaKit.addSubtitle(url: url) else { throw LibraryFailure.app("subtitle_load_failed") }
       cues = []; subtitleName = url.lastPathComponent; surface?.caption.isHidden = true; publish(); return
     }
     guard ["srt", "vtt"].contains(url.pathExtension.lowercased()) else {
-      throw LibraryFailure.message("当前原生引擎支持外置 SRT / VTT；ASS / PGS 需在 MediaKit 媒体中使用")
+      throw LibraryFailure.app("subtitle_format_unsupported")
     }
     let text = try String(contentsOf: url, encoding: .utf8)
       .replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
@@ -1105,7 +1189,7 @@ final class PlaybackService: NSObject {
       let caption = lines[(i + 1)...].joined(separator: "\n").replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
       parsed.append(SubtitleCue(start: start, end: end, text: caption))
     }
-    guard !parsed.isEmpty else { throw LibraryFailure.message("字幕没有可读时间轴，请使用 UTF-8 编码的 SRT 或 VTT") }
+    guard !parsed.isEmpty else { throw LibraryFailure.app("subtitle_timeline_invalid") }
     if detectingIntro { seek(position) }
     try selectTrack(kind: "subtitle", index: -1)
     cues = parsed.sorted { $0.start < $1.start }; subtitleName = URL(fileURLWithPath: path).lastPathComponent; publish()
@@ -1113,7 +1197,8 @@ final class PlaybackService: NSObject {
 
   func stopForMutation(_ path: String) {
     if queue.contains(where: { $0 == path || $0.hasPrefix(path + "/") }) {
-      finishTrackSelection("媒体已关闭，请重新选择轨道")
+      finishTrackSelection("track_selection_stale")
+      assetPreparationTask?.cancel(); assetPreparationTask = nil
       pause(); cancelSeeks(); clearBoundary(); openingTimeout?.cancel(); generation += 1
       discardMediaKitPiP()
       mediaKit?.stopPlayback(); mediaKit = nil
@@ -1127,11 +1212,29 @@ final class PlaybackService: NSObject {
     }
   }
 
+  func remapQueuePath(from old: String, to new: String) {
+    let currentWasRemapped = currentPath.map { $0 == old || $0.hasPrefix(old + "/") } == true
+    let shouldResume = wantsPlayback
+    var changed = false
+    queue = queue.map { path in
+      guard path == old || path.hasPrefix(old + "/") else { return path }
+      changed = true
+      return new + String(path.dropFirst(old.count))
+    }
+    guard changed else { return }
+    persist()
+    if currentWasRemapped {
+      load(resume: true, autoplay: shouldResume)
+    } else {
+      publish()
+    }
+  }
+
   private func scheduleOpenTimeout(token: Int) {
     openingTimeout?.cancel()
     let timeout = DispatchWorkItem { [weak self] in
       guard let self = self, self.generation == token, !self.timelineReady else { return }
-      self.fail("打开媒体超时，请检查文件是否完整下载或复制后重试")
+      self.fail("open_timeout")
     }
     openingTimeout = timeout
     DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: timeout)
@@ -1146,9 +1249,9 @@ final class PlaybackService: NSObject {
     }
     // Only container/decoder failures justify trying a different engine.
     let mediaFailure = detail.domain == AVFoundationErrorDomain && [-11800, -11821, -11828, -11829, -11833].contains(detail.code)
-    guard !fallbackUsed, mediaFailure else { fail("无法播放：\(detail.localizedDescription)"); return }
+    guard !fallbackUsed, mediaFailure else { fail("media_playback_failed"); return }
     fallbackUsed = true
-    engineNotice = "当前媒体改用兼容引擎播放"
+    engineNotice = "fallback_engine_active"
     openMediaKit(url: url, resume: resume, token: token)
   }
 
@@ -1158,16 +1261,18 @@ final class PlaybackService: NSObject {
     clearBoundary()
     discardAVPlayerPiP()
     do {
-      let session = AVAudioSession.sharedInstance()
-      try session.setCategory(.playback, mode: .moviePlayback, options: [])
-      try session.setActive(true)
-    } catch { fail("暂时无法取得音频播放权限：\(error.localizedDescription)"); return }
+      try activateAudioSession()
+    } catch {
+      lastDiagnostic = error.localizedDescription
+      if !interrupted { fail("audio_permission_failed"); return }
+      errorMessage = ""
+    }
     cancelSeeks()
     player.pause(); player.replaceCurrentItem(with: nil)
     observations = Array(observations.prefix(1))
     timelineReady = false; timelineOrigin = 0; preparedMediaKit = false
     pendingResume = resume; loading = true
-    guard let transport = mediaKitTransport else { fail("media_kit 通道尚未就绪"); return }
+    guard let transport = mediaKitTransport else { fail("playback_channel_unavailable"); return }
     let engine = LeeMediaKitEngine(transport: transport)
     mediaKit = engine
     engine.rate = rate; engine.volume = mediaVolume
@@ -1202,8 +1307,8 @@ final class PlaybackService: NSObject {
       if engine.seekable {
         finishStart(start, token: introToken, itemGeneration: token)
       } else {
-        engineNotice = "此媒体不支持定位，已从开头播放"
-        if wantsPlayback && !interrupted { play() }
+        engineNotice = "media_not_seekable"
+        if wantsPlayback { play() }
         publish()
       }
       return
@@ -1217,17 +1322,17 @@ final class PlaybackService: NSObject {
   }
 
   func startPiP(delegate: AVPictureInPictureControllerDelegate, requestID: String? = nil) throws {
-    guard retiringPiP.isEmpty else { throw LibraryFailure.message("画中画正在结束，请稍后重试") }
-    guard !mediaIsAudio else { throw LibraryFailure.message("纯音频可在后台播放，无需画中画") }
+    guard retiringPiP.isEmpty else { throw LibraryFailure.app("pip_ending") }
+    guard !mediaIsAudio else { throw LibraryFailure.app("pip_audio_unnecessary") }
     guard AVPictureInPictureController.isPictureInPictureSupported() else {
-      throw LibraryFailure.message("当前设备不支持画中画")
+      throw LibraryFailure.app("pip_unsupported")
     }
     if let mediaKit = mediaKit {
       guard !mediaKitPiPPreparing, mediaKitPiP == nil, !mediaKitPiPRestoring else {
-        throw LibraryFailure.message("画中画正在处理中，请勿连续点击")
+        throw LibraryFailure.app("pip_busy")
       }
       guard let requestID = requestID, !requestID.isEmpty else {
-        throw LibraryFailure.message("画中画请求无效，请重试")
+        throw LibraryFailure.app("pip_request_invalid")
       }
       mediaKitPiPPreparing = true
       mediaKitPiPRequestID = requestID
@@ -1238,7 +1343,7 @@ final class PlaybackService: NSObject {
         self.mediaKitPiPPreparing = false
         self.mediaKitPiPRequestID = nil
         self.mediaKitPiPPreparationTimeout = nil
-        self.notice?("画中画准备超时，请稍后重试")
+        self.notice?("pip_prepare_timeout")
         self.publish()
       }
       mediaKitPiPPreparationTimeout = timeout
@@ -1251,22 +1356,22 @@ final class PlaybackService: NSObject {
           self.mediaKitPiPPreparationTimeout = nil
           self.mediaKitPiPPreparing = false
           self.mediaKitPiPRequestID = nil
-          self.notice?("画中画启动失败，请稍后重试")
+          self.notice?("pip_start_failed")
           self.publish()
         }
       }
     } else {
-      if pipRequesting { throw LibraryFailure.message("画中画正在准备中，请勿连续点击") }
+      if pipRequesting { throw LibraryFailure.app("pip_busy") }
       guard let videoLayer = surface?.videoLayer, videoLayer.player === player else {
-        throw LibraryFailure.message("当前视频画面尚未就绪，请稍后重试")
+        throw LibraryFailure.app("pip_video_not_ready")
       }
       prepareAVPlayerPiP()
       guard let controller = pip, controller.playerLayer === videoLayer else {
-        throw LibraryFailure.message("无法创建系统画中画控制器")
+        throw LibraryFailure.app("pip_controller_failed")
       }
       controller.delegate = delegate
       guard controller.isPictureInPicturePossible else {
-        throw LibraryFailure.message("当前视频暂时无法进入画中画，请稍后重试")
+        throw LibraryFailure.app("pip_temporarily_unavailable")
       }
       cancelPendingAVPlayerPiP()
       avPlayerPiPAuthorized = true
@@ -1285,7 +1390,7 @@ final class PlaybackService: NSObject {
         self.cancelPendingAVPlayerPiP()
         self.pip = nil
         self.suspendAVPlayerPresentationForBackground()
-        self.notice?("系统未能启动画中画，请重试")
+        self.notice?("pip_start_failed")
         self.publish()
       }
       pipActivationTimeout = activationTimeout
@@ -1354,7 +1459,7 @@ final class PlaybackService: NSObject {
       mediaKitPiPPreparationTimeout = nil
       mediaKitPiPPreparing = false
       mediaKitPiPRequestID = nil
-      notice?("画中画准备期间播放页面已关闭，请重试播放")
+      notice?("pip_page_closed")
       publish()
       completion(false)
       return
@@ -1373,7 +1478,7 @@ final class PlaybackService: NSObject {
         guard let self = self, let renderer = renderer, self.mediaKitPiP === renderer else { return }
         self.retirePiP(renderer.controller, renderer: renderer)
         self.mediaKitPiP = nil
-        self.restoreMediaKitVideoOutput(successNotice: "画中画未能启动，已重新连接视频输出")
+        self.restoreMediaKitVideoOutput()
       }
       renderer.seekRequested = { [weak self] seconds in self?.seek(seconds) }
       renderer.positionProvider = { [weak self] in self?.position ?? 0 }
@@ -1397,7 +1502,7 @@ final class PlaybackService: NSObject {
       mediaKitPiPPreparationTimeout = nil
       mediaKitPiPPreparing = false
       mediaKitPiPRequestID = nil
-      notice?("画中画未能安全接管视频输出，请重试播放")
+      notice?("pip_output_takeover_failed")
       publish()
       completion(false)
     }
@@ -1407,35 +1512,59 @@ final class PlaybackService: NSObject {
     guard let renderer = mediaKitPiP, renderer.controller === controller else { return }
     renderer.stop()
     mediaKitPiP = nil
-    restoreMediaKitVideoOutput(successNotice: nil)
+    restoreMediaKitVideoOutput()
   }
 
   func ownsMediaKitPiP(_ controller: AVPictureInPictureController) -> Bool {
     mediaKitPiP?.controller === controller
   }
 
-  private func restoreMediaKitVideoOutput(successNotice: String?) {
+  private func restoreMediaKitVideoOutput() {
     guard !mediaKitPiPRestoring else { return }
     guard let mediaKit = mediaKit else { mediaKitPiPRestoring = false; publish(); return }
+    let token = generation
     mediaKitPiPRestoring = true
+    mediaKitPiPRestoreTimeout?.cancel()
+    let timeout = DispatchWorkItem { [weak self, weak mediaKit] in
+      guard let self = self, let mediaKit = mediaKit, self.mediaKit === mediaKit,
+            self.generation == token, self.mediaKitPiPRestoring else { return }
+      self.mediaKitPiPRestoreTimeout = nil
+      self.recoverMediaKitVideoOutput()
+    }
+    mediaKitPiPRestoreTimeout = timeout
+    DispatchQueue.main.asyncAfter(deadline: .now() + 24, execute: timeout)
     publish()
     mediaKit.restoreVideoOutput { [weak self, weak mediaKit] success in
       DispatchQueue.main.async {
-        guard let self = self, let mediaKit = mediaKit, self.mediaKit === mediaKit else { return }
+        guard let self = self, let mediaKit = mediaKit, self.mediaKit === mediaKit,
+              self.generation == token, self.mediaKitPiPRestoring else { return }
+        self.mediaKitPiPRestoreTimeout?.cancel()
+        self.mediaKitPiPRestoreTimeout = nil
         self.mediaKitPiPRestoring = false
         if success {
-          if let successNotice = successNotice { self.notice?(successNotice) }
           self.publish()
         } else {
-          self.fail("画中画退出后视频画面恢复失败，请重新打开媒体")
+          self.recoverMediaKitVideoOutput()
         }
       }
     }
   }
 
+  private func recoverMediaKitVideoOutput() {
+    mediaKitPiPRestoreTimeout?.cancel()
+    mediaKitPiPRestoreTimeout = nil
+    mediaKitPiPRestoring = false
+    guard currentPath != nil else { publish(); return }
+    let shouldResume = wantsPlayback
+    persist()
+    load(resume: true, autoplay: shouldResume)
+  }
+
   private func discardMediaKitPiP() {
     mediaKitPiPPreparationTimeout?.cancel()
     mediaKitPiPPreparationTimeout = nil
+    mediaKitPiPRestoreTimeout?.cancel()
+    mediaKitPiPRestoreTimeout = nil
     mediaKitPiPPreparing = false
     mediaKitPiPRequestID = nil
     if let renderer = mediaKitPiP { retirePiP(renderer.controller, renderer: renderer) }
@@ -1451,7 +1580,7 @@ final class PlaybackService: NSObject {
     clearBoundary()
     if let mediaKit = mediaKit {
       let success = mediaKit.setLoop(from: aPoint ?? -1, to: bPoint ?? -1)
-      if !success && bPoint != nil { errorMessage = "当前媒体无法设置 A–B 循环"; aPoint = nil; bPoint = nil }
+      if !success && bPoint != nil { errorMessage = "ab_repeat_unsupported"; aPoint = nil; bPoint = nil }
       return
     }
     guard let a = aPoint, let b = bPoint else { return }
@@ -1502,17 +1631,21 @@ final class PlaybackService: NSObject {
 }
 
 /// Removes only a shared leading absence of media, never encoded black frames.
-/// Runs on assetPreparation; the source file is only referenced, never rewritten.
+/// Runs in a generation-scoped task; the source file is only referenced, never rewritten.
 private enum PlaybackTimeline {
-  static func prepare(url: URL) throws -> (asset: AVAsset, origin: Double) {
+  static func prepare(url: URL) async throws -> (asset: AVAsset, origin: Double) {
     let source = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
-    let tracks = source.tracks
+    let tracks = try await source.load(.tracks)
+    try Task.checkCancellation()
+    let duration = try await source.load(.duration)
+    try Task.checkCancellation()
     let relevant = tracks.filter {
       [.video, .audio, .subtitle, .text, .closedCaption].contains($0.mediaType)
     }
-    guard !relevant.isEmpty, source.duration.seconds.isFinite else { return (source, 0) }
+    guard !relevant.isEmpty, duration.seconds.isFinite else { return (source, 0) }
     var starts: [CMTime] = []
     for track in relevant {
+      try Task.checkCancellation()
       // Segment targets are in the movie clock. Ignore explicit empty edits.
       let populated = track.segments.filter { !$0.isEmpty }
       guard let start = populated.map({ $0.timeMapping.target.start })
@@ -1523,14 +1656,15 @@ private enum PlaybackTimeline {
       starts.append(start)
     }
     guard let origin = starts.min(by: { CMTimeCompare($0, $1) < 0 }),
-      origin.seconds > 0.15, CMTimeCompare(origin, source.duration) < 0 else { return (source, 0) }
+      origin.seconds > 0.15, CMTimeCompare(origin, duration) < 0 else { return (source, 0) }
     let composition = AVMutableComposition()
     // Copy references with the original common clock first, then remove the shared gap.
     // This preserves delayed video/audio starts relative to one another.
     for track in tracks {
+      try Task.checkCancellation()
       guard let target = composition.addMutableTrack(withMediaType: track.mediaType,
         preferredTrackID: track.trackID) else {
-        throw LibraryFailure.message("无法保留媒体轨道，未调整时间轴")
+        throw LibraryFailure.app("timeline_adjustment_failed")
       }
       try target.insertTimeRange(track.timeRange, of: track, at: track.timeRange.start)
       target.preferredTransform = track.preferredTransform

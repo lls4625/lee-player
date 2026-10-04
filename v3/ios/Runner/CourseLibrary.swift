@@ -1,11 +1,28 @@
 import Foundation
 
 enum LibraryFailure: LocalizedError {
-  case message(String)
-  var errorDescription: String? {
-    if case .message(let text) = self { return text }
+  case app(code: String, args: [String: Any], technicalDetail: String?)
+
+  static func app(_ code: String, args: [String: Any] = [:], technicalDetail: String? = nil) -> LibraryFailure {
+    .app(code: code, args: args, technicalDetail: technicalDetail)
+  }
+
+  var code: String {
+    if case .app(let code, _, _) = self { return code }
+    return "operation_failed"
+  }
+
+  var args: [String: Any] {
+    if case .app(_, let args, _) = self { return args }
+    return [:]
+  }
+
+  var technicalDetail: String? {
+    if case .app(_, _, let detail) = self { return detail }
     return nil
   }
+
+  var errorDescription: String? { technicalDetail ?? code }
 }
 
 /// All filesystem work is serialized by PlayerBridge; UI metadata is main-thread owned.
@@ -44,7 +61,7 @@ final class CourseLibrary {
     let candidate = root.appendingPathComponent(path).standardizedFileURL.resolvingSymlinksInPath()
     let base = root.standardizedFileURL.resolvingSymlinksInPath().path
     guard candidate.path.hasPrefix(base + "/") || (allowRoot && candidate.path == base) else {
-      throw LibraryFailure.message("文件路径无效")
+      throw LibraryFailure.app("file_path_invalid")
     }
     return candidate
   }
@@ -53,7 +70,7 @@ final class CourseLibrary {
     let base = directory.standardizedFileURL.resolvingSymlinksInPath().pathComponents
     let components = file.standardizedFileURL.resolvingSymlinksInPath().pathComponents
     guard components.starts(with: base) else {
-      throw LibraryFailure.message("文件不在指定目录内，无法生成课程路径")
+      throw LibraryFailure.app("library_path_invalid")
     }
     return components.dropFirst(base.count).joined(separator: "/")
   }
@@ -68,7 +85,7 @@ final class CourseLibrary {
     guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: keys,
       options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { _, error in
         scanError = error; return false
-      }) else { throw LibraryFailure.message("无法读取课程目录") }
+      }) else { throw LibraryFailure.app("library_read_failed") }
     var items: [[String: Any]] = []
     for case let file as URL in enumerator {
       let values = try file.resourceValues(forKeys: Set(keys))
@@ -112,14 +129,14 @@ final class CourseLibrary {
     let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !clean.isEmpty, clean != ".", clean != "..", !clean.hasPrefix("."),
       !clean.contains("/"), !clean.contains(":"), !clean.contains("\0"), clean.utf8.count < 240 else {
-      throw LibraryFailure.message("名称不能为空，不能包含 /、: 或以点开头")
+      throw LibraryFailure.app("invalid_file_name")
     }
     return clean
   }
 
   func createFolder(parent: String, name: String) throws {
     let target = try url(parent, allowRoot: true).appendingPathComponent(validName(name))
-    guard !fm.fileExists(atPath: target.path) else { throw LibraryFailure.message("同名项目已存在") }
+    guard !fm.fileExists(atPath: target.path) else { throw LibraryFailure.app("duplicate_item") }
     try fm.createDirectory(at: target, withIntermediateDirectories: false,
       attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
   }
@@ -128,9 +145,9 @@ final class CourseLibrary {
     let source = try url(path)
     let destination = try url(parent, allowRoot: true).appendingPathComponent(validName(name)).standardizedFileURL
     guard destination != source, !destination.path.hasPrefix(source.path + "/") else {
-      throw LibraryFailure.message("不能移到原位置或自己的子目录")
+      throw LibraryFailure.app("invalid_move_destination")
     }
-    guard !fm.fileExists(atPath: destination.path) else { throw LibraryFailure.message("目标中已有同名项目") }
+    guard !fm.fileExists(atPath: destination.path) else { throw LibraryFailure.app("destination_duplicate_item") }
     try fm.moveItem(at: source, to: destination)
     return try relative(destination)
   }
@@ -157,11 +174,11 @@ final class CourseLibrary {
   }
 
   func restore(token: String) throws {
-    guard UUID(uuidString: token) != nil else { throw LibraryFailure.message("恢复标识无效") }
+    guard UUID(uuidString: token) != nil else { throw LibraryFailure.app("restore_token_invalid") }
     let directory = support.appendingPathComponent("Trash/" + token)
     let path = try String(contentsOf: directory.appendingPathComponent("original.txt"), encoding: .utf8)
     let target = try url(path)
-    guard !fm.fileExists(atPath: target.path) else { throw LibraryFailure.message("原位置已有同名文件，请先改名") }
+    guard !fm.fileExists(atPath: target.path) else { throw LibraryFailure.app("restore_destination_exists") }
     try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
     try fm.moveItem(at: directory.appendingPathComponent("content"), to: target)
     try? fm.removeItem(at: directory)
@@ -213,7 +230,7 @@ final class CourseLibrary {
   func cancelImport() { cancellation.lock(); cancelled = true; cancellation.unlock() }
   private func checkCancellation() throws {
     cancellation.lock(); let value = cancelled; cancellation.unlock()
-    if value { throw LibraryFailure.message("已取消导入，未完成的文件已清理") }
+    if value { throw LibraryFailure.app("import_cancelled") }
   }
 
   /// Stage each selection outside Documents; only complete selections become visible.
@@ -233,11 +250,11 @@ final class CourseLibrary {
         do {
           var directoryFlag: ObjCBool = false
           guard self.fm.fileExists(atPath: coordinated.path, isDirectory: &directoryFlag) else {
-            throw LibraryFailure.message("所选文件不可用，请先下载到本机")
+            throw LibraryFailure.app("selected_file_unavailable")
           }
           let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
           guard try coordinated.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else {
-            throw LibraryFailure.message("不能导入符号链接，请选择原文件")
+            throw LibraryFailure.app("symbolic_link_unsupported")
           }
           var files: [URL] = []
           if directoryFlag.boolValue {
@@ -254,7 +271,9 @@ final class CourseLibrary {
           var total: Int64 = 0
           for file in files { total += Int64(try file.resourceValues(forKeys: keys).fileSize ?? 0) }
           let capacity = try destination.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage
-          if let capacity = capacity, total + 32 * 1024 * 1024 > capacity { throw LibraryFailure.message("剩余空间不足，导入需要约 \(total / 1024 / 1024) MB") }
+          if let capacity = capacity, total + 32 * 1024 * 1024 > capacity {
+            throw LibraryFailure.app("storage_insufficient", args: ["requiredMB": total / 1024 / 1024])
+          }
           let staged = staging.appendingPathComponent("selection")
           if directoryFlag.boolValue { try self.fm.createDirectory(at: staged, withIntermediateDirectories: true) }
           var completed: Int64 = 0
@@ -271,7 +290,7 @@ final class CourseLibrary {
               continue
             }
             try self.fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-            guard let input = InputStream(url: file), let output = OutputStream(url: target, append: false) else { throw LibraryFailure.message("无法打开导入文件") }
+            guard let input = InputStream(url: file), let output = OutputStream(url: target, append: false) else { throw LibraryFailure.app("import_file_open_failed") }
             input.open(); output.open()
             defer { input.close(); output.close() }
             var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
@@ -279,11 +298,11 @@ final class CourseLibrary {
               try self.checkCancellation()
               let count = input.read(&buffer, maxLength: buffer.count)
               if count == 0 { break }
-              if count < 0 { throw input.streamError ?? LibraryFailure.message("读取失败") }
+              if count < 0 { throw input.streamError ?? LibraryFailure.app("import_read_failed") }
               var written = 0
               while written < count {
                 let amount = buffer.withUnsafeBufferPointer { output.write($0.baseAddress! + written, maxLength: count - written) }
-                if amount <= 0 { throw output.streamError ?? LibraryFailure.message("写入失败，请检查存储空间") }
+                if amount <= 0 { throw output.streamError ?? LibraryFailure.app("import_write_failed") }
                 written += amount
               }
               completed += Int64(count)
@@ -308,7 +327,17 @@ final class CourseLibrary {
         } catch { operationError = error }
       }
       if let error = coordinationError { throw error }
-      if let error = operationError { throw LibraryFailure.message("\(error.localizedDescription)；此前已完成 \(imported.count) 项") }
+      if let error = operationError {
+        let failure = error as? LibraryFailure
+        throw LibraryFailure.app(
+          "import_partial_failure",
+          args: [
+            "completed": imported.count,
+            "reasonCode": failure?.code ?? "operation_failed",
+            "reasonArgs": failure?.args ?? [:],
+          ],
+          technicalDetail: failure?.technicalDetail ?? error.localizedDescription)
+      }
     }
     return imported
   }

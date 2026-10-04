@@ -187,7 +187,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       final message = m.message!;
       m.consumeMessage();
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) showLeiToast(context, message);
+        if (mounted) showLeiMessageToast(context, message);
       });
     }
   }
@@ -1694,6 +1694,11 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   Widget importStatus() {
     final done = (m.importProgress?['done'] as num?)?.toInt() ?? 0;
     final total = (m.importProgress?['total'] as num?)?.toInt() ?? 0;
+    final progressName = m.importProgress?['name'] as String?;
+    final progressCode = m.importProgress?['nameCode'] as String?;
+    final title = progressName ?? (progressCode == null
+        ? AppLocalizations.of(context).text('请选择要导入的文件')
+        : AppLocalizations.of(context).message(AppMessage(progressCode)));
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
       child: LeiSurface(
@@ -1704,8 +1709,8 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           children: [
             LeiGlassTile(
               dense: true,
-              title: LText(
-                '${m.importProgress?['name'] ?? '请选择要导入的文件'}',
+              title: Text(
+                title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),

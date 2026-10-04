@@ -26,7 +26,26 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     playback.pipDelegate = self
     playback.mediaKitTransport = { [weak self] method, arguments, completion in
       guard let self = self else { completion(false); return }
+      var completed = false
+      let timeoutSeconds: TimeInterval
+      switch method {
+      case "open": timeoutSeconds = 16
+      case "pip": timeoutSeconds = 20
+      case "pipRestore": timeoutSeconds = 24
+      case "seek": timeoutSeconds = 9
+      case "release", "stop": timeoutSeconds = 5
+      default: timeoutSeconds = 7
+      }
+      let timeout = DispatchWorkItem {
+        guard !completed else { return }
+        completed = true
+        completion(false)
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSeconds, execute: timeout)
       self.mediaKitChannel.invokeMethod(method, arguments: arguments) { value in
+        guard !completed else { return }
+        completed = true
+        timeout.cancel()
         completion((value as? Bool) == true)
       }
     }
@@ -64,7 +83,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     }
     playback.changed = { [weak self] state in self?.sink?(["type": "player", "state": state]) }
     playback.restoreRequested = { [weak self] in self?.sink?(["type": "openPlayer"]) }
-    playback.notice = { [weak self] message in self?.sink?(["type": "notice", "message": message]) }
+    playback.notice = { [weak self] code in self?.sink?(["type": "notice", "code": code]) }
   }
 
   static func register(with registrar: FlutterPluginRegistrar) {
@@ -76,7 +95,12 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       registrar.register(VideoFactory(service: instance.playback), withId: "lei.player/video")
     } catch {
       let channel = FlutterMethodChannel(name: "lei.player/methods", binaryMessenger: registrar.messenger())
-      channel.setMethodCallHandler { _, result in result(FlutterError(code: "storage", message: "课程库初始化失败：\(error.localizedDescription)", details: nil)) }
+      channel.setMethodCallHandler { _, result in
+        result(FlutterError(
+          code: "library_initialization_failed",
+          message: nil,
+          details: ["technicalDetail": error.localizedDescription]))
+      }
     }
   }
 
@@ -86,11 +110,19 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   func onCancel(withArguments arguments: Any?) -> FlutterError? { sink = nil; return nil }
 
   private func failure(_ error: Error) -> FlutterError {
-    FlutterError(code: "player", message: error.localizedDescription, details: nil)
+    if let failure = error as? LibraryFailure {
+      var details: [String: Any] = ["args": failure.args]
+      if let technicalDetail = failure.technicalDetail { details["technicalDetail"] = technicalDetail }
+      return FlutterError(code: failure.code, message: nil, details: details)
+    }
+    return FlutterError(
+      code: "operation_failed",
+      message: nil,
+      details: ["technicalDetail": error.localizedDescription])
   }
 
   private func perform(_ result: @escaping FlutterResult, operation: @escaping () throws -> Any?, completion: ((Any?) -> Void)? = nil) {
-    guard !busy else { result(failure(LibraryFailure.message("文件操作进行中，请稍后重试"))); return }
+    guard !busy else { result(failure(LibraryFailure.app("file_operation_busy"))); return }
     busy = true
     work.async {
       do {
@@ -111,13 +143,13 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       case "setLanguage":
         guard let value = args["value"] as? String,
           ["system", "zh-Hans", "zh-Hant", "ja", "en"].contains(value) else {
-          throw LibraryFailure.message("Invalid language option")
+          throw LibraryFailure.app("invalid_language_option")
         }
         UserDefaults.standard.set(value, forKey: "language.mode")
         result(value); return
       case "setAppearance":
         guard let value = args["value"] as? String, ["system", "light", "dark"].contains(value) else {
-          throw LibraryFailure.message("无效的外观选项")
+          throw LibraryFailure.app("invalid_appearance_option")
         }
         UserDefaults.standard.set(value, forKey: "appearance.mode")
         result(value); return
@@ -135,7 +167,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         let ascending = args["ascending"] as? Bool
           ?? (defaults.object(forKey: "library.sortAscending") as? Bool) ?? true
         guard ["list", "grid"].contains(layout), ["name", "type", "size", "date"].contains(sort) else {
-          throw LibraryFailure.message("无效的课程库显示或排序选项")
+          throw LibraryFailure.app("invalid_library_preferences")
         }
         defaults.set(layout, forKey: "library.layout")
         defaults.set(sort, forKey: "library.sort")
@@ -147,8 +179,8 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       case "state": result(playback.snapshot()); return
       case "playbackInfo": result(playback.playbackInfo()); return
       case "import":
-        guard !busy && importResult == nil else { throw LibraryFailure.message("已有文件操作正在进行") }
-        guard let controller = topController() else { throw LibraryFailure.message("无法打开系统文件选择器") }
+        guard !busy && importResult == nil else { throw LibraryFailure.app("file_operation_busy") }
+        guard let controller = topController() else { throw LibraryFailure.app("file_picker_unavailable") }
         importParent = args["parent"] as? String ?? ""
         _ = try library.url(importParent, allowRoot: true)
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: args["folder"] as? Bool == true ? [.folder] : [.item], asCopy: false)
@@ -163,17 +195,20 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         let parent = args["parent"] as? String ?? "", name = args["name"] as? String ?? ""
         perform(result, operation: { try self.library.createFolder(parent: parent, name: name); return nil }); return
       case "move":
-        guard !busy && importResult == nil else { throw LibraryFailure.message("请等待当前文件操作完成") }
+        guard !busy && importResult == nil else { throw LibraryFailure.app("file_operation_busy") }
         let path = args["path"] as? String ?? "", parent = args["parent"] as? String ?? "", name = args["name"] as? String ?? ""
-        playback.stopForMutation(path)
         perform(result, operation: { try self.library.move(path: path, parent: parent, name: name) }, completion: { value in
-          if let new = value as? String { self.library.remapRecords(from: path, to: new) }
+          if let new = value as? String {
+            self.library.remapRecords(from: path, to: new)
+            self.playback.remapQueuePath(from: path, to: new)
+          }
         }); return
       case "trash":
-        guard !busy && importResult == nil else { throw LibraryFailure.message("请等待当前文件操作完成") }
+        guard !busy && importResult == nil else { throw LibraryFailure.app("file_operation_busy") }
         let path = args["path"] as? String ?? ""
-        playback.stopForMutation(path)
-        perform(result, operation: { try self.library.trash(path: path) }); return
+        perform(result, operation: { try self.library.trash(path: path) }, completion: { _ in
+          self.playback.stopForMutation(path)
+        }); return
       case "trashList": perform(result, operation: { try self.library.trashList() }); return
       case "restore":
         let token = args["token"] as? String ?? ""
@@ -205,9 +240,9 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       case "configure": try playback.configure(args)
       case "track":
         guard let session = args["generation"] as? Int, let kind = args["kind"] as? String,
-          let index = args["index"] as? Int else { throw LibraryFailure.message("请重新打开轨道列表后选择") }
+          let index = args["index"] as? Int else { throw LibraryFailure.app("track_selection_stale") }
         try playback.requestTrack(kind: kind, index: index, id: args["id"] as? String, session: session) { message in
-          if let message = message { result(FlutterError(code: "track", message: message, details: nil)) }
+          if let message = message { result(FlutterError(code: message, message: nil, details: nil)) }
           else { result(true) }
         }
         return
@@ -225,7 +260,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
           guard pendingMediaKitPiPSourceView?.window != nil else {
             pendingMediaKitPiPToken = nil
             pendingMediaKitPiPSourceView = nil
-            throw LibraryFailure.message("当前播放页面尚未就绪，请稍后重试")
+            throw LibraryFailure.app("player_page_unavailable")
           }
           DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
             guard self?.pendingMediaKitPiPToken == pipToken else { return }
@@ -257,7 +292,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     guard !urls.isEmpty else { callback(0); return }
     let parent = importParent
     library.beginImport()
-    sink?(["type": "import", "name": "正在统计文件与检查空间", "done": 0, "total": 0])
+    sink?(["type": "import", "nameCode": "import_preparing", "done": 0, "total": 0])
     backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "课程导入") { [weak self] in
       guard let self = self else { return }
       self.library.cancelImport()
@@ -327,7 +362,11 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
     if playback.finishRetiringPiP(pictureInPictureController) { return }
     guard playback.pip === pictureInPictureController || playback.ownsMediaKitPiP(pictureInPictureController) else { return }
-    sink?(["type": "notice", "message": "画中画启动失败：\(error.localizedDescription)"])
+    sink?([
+      "type": "notice",
+      "code": "pip_start_failed",
+      "technicalDetail": error.localizedDescription,
+    ])
     if playback.pip === pictureInPictureController {
       playback.finishAVPlayerPiP(pictureInPictureController)
     } else if playback.ownsMediaKitPiP(pictureInPictureController) {

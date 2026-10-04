@@ -14,6 +14,7 @@ class MediaKitPlayback extends ChangeNotifier {
   String engineId = '';
   String? _requestedId;
   Future<void> _commands = Future<void>.value();
+  int _commandEpoch = 0;
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   final List<String> _errors = [];
   final Stopwatch _clock = Stopwatch();
@@ -27,7 +28,7 @@ class MediaKitPlayback extends ChangeNotifier {
   Future<void> _createVideoOutput(Player player) async {
     final id = engineId;
     final videoController = controller;
-    if (videoController == null) throw StateError('Flutter 视频控制器已释放');
+    if (videoController == null) throw StateError('Flutter video controller was released');
     final handle = await player.handle;
     final previousTextureId = videoController.id.value;
     await _videoChannel.invokeMethod<void>('VideoOutputManager.Create', {
@@ -37,9 +38,9 @@ class MediaKitPlayback extends ChangeNotifier {
       },
     });
     if (!await _waitForVideoTexture(videoController, id, previousTextureId)) {
-      throw StateError('Flutter 视频输出未能重新建立');
+      throw StateError('Flutter video output could not be recreated');
     }
-    if (_requestedId != id || _player != player || _disposed) throw StateError('播放会话已切换');
+    if (_requestedId != id || _player != player || _disposed) throw StateError('Playback session changed');
     await _restoreVideoTrack(player.platform as NativePlayer);
     final deadline = Stopwatch()..start();
     while (deadline.elapsed < const Duration(seconds: 12) && _requestedId == id && !_disposed) {
@@ -50,7 +51,7 @@ class MediaKitPlayback extends ChangeNotifier {
       }
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
-    throw StateError('视频输出已注册，但画面尺寸仍未恢复');
+    throw StateError('Video output was registered without restored dimensions');
   }
 
   Future<void> _restoreVideoTrack(NativePlayer native) async {
@@ -64,21 +65,40 @@ class MediaKitPlayback extends ChangeNotifier {
     final id = args['engineId'] as String?;
     if (call.method == 'open') _requestedId = id;
     if (call.method == 'release' || call.method == 'stop' && _requestedId == id) _requestedId = null;
+    final barrier = call.method == 'open' || call.method == 'release' ||
+      call.method == 'stop' && _requestedId == null;
+    if (barrier) {
+      _commandEpoch++;
+      // A new playback session must not wait behind a plugin Future which may
+      // never complete. Late work is isolated by engineId and _requestedId.
+      _commands = Future<void>.value();
+    }
+    final epoch = _commandEpoch;
     final result = Completer<bool>();
     _commands = _commands.then((_) async {
       try {
-        result.complete(await _execute(call.method, args));
+        final value = await _execute(call.method, args).timeout(_commandTimeout(call.method));
+        if (!result.isCompleted) result.complete(value);
       } catch (error) {
         _log('${call.method}: $error');
-        if (call.method == 'open' && engineId == id) {
-          _failure = 'media_kit 打开失败：$error';
+        if (call.method == 'open' && _requestedId == id && epoch == _commandEpoch) {
+          _failure = 'media_kit_open_failed';
           await _publishFailure();
         }
-        result.complete(false);
+        if (!result.isCompleted) result.complete(false);
       }
     });
     return result.future;
   }
+
+  Duration _commandTimeout(String method) => switch (method) {
+    'open' => const Duration(seconds: 14),
+    'pip' => const Duration(seconds: 18),
+    'pipRestore' => const Duration(seconds: 22),
+    'seek' => const Duration(seconds: 8),
+    'release' || 'stop' => const Duration(seconds: 4),
+    _ => const Duration(seconds: 6),
+  };
 
   Future<bool> _execute(String method, Map<String, dynamic> args) async {
     if (_disposed) return false;
@@ -160,15 +180,20 @@ class MediaKitPlayback extends ChangeNotifier {
           if (started && _requestedId == id) {
             await _restoreVideoTrack(native);
           }
-          if (!started) {
-            _failure = '画中画未能安全接管视频输出，请点击重试播放';
-            await _publishFailure();
+          if (!started && handoffBegan && _requestedId == id && _player == player) {
+            // The native request may have expired while this command was
+            // queued. Roll back the output takeover without poisoning playback.
+            await _restorePiPVideoOutput(player, native);
           }
           return started;
         } catch (error, stackTrace) {
           if (handoffBegan && _requestedId == id) {
-            _failure = '画中画切换失败：视频输出状态不确定，请点击重试播放';
-            await _publishFailure();
+            try { await _restorePiPVideoOutput(player, native); }
+            catch (restoreError) {
+              _log('pip output rollback failed: $restoreError');
+              _failure = 'pip_restore_failed';
+              await _publishFailure();
+            }
           } else if (!handoffBegan) {
             try { await _restoreVideoTrack(native); }
             catch (restoreError) { _log('pip video rollback failed: $restoreError'); }
@@ -294,22 +319,22 @@ class MediaKitPlayback extends ChangeNotifier {
     final subtitles = state.tracks.subtitle.where((track) => track.id != 'auto' && track.id != 'no').toList();
     final audioRows = [for (var index = 0; index < audio.length; index++) {
       'index': index, 'id': audio[index].id,
-      'name': [audio[index].title ?? '音轨 ${index + 1}', audio[index].language,
-        audio[index].codec, if (audio[index].channelscount != null) '${audio[index].channelscount} 声道']
+      'name': [audio[index].title ?? 'Audio ${index + 1}', audio[index].language,
+        audio[index].codec, if (audio[index].channelscount != null) '${audio[index].channelscount} ch']
         .whereType<String>().where((text) => text.isNotEmpty).join(' · '),
       'selected': audio[index].id == values[3],
     }];
     final subtitleRows = [for (var index = 0; index < subtitles.length; index++) {
       'index': index, 'id': subtitles[index].id,
-      'name': [subtitles[index].title ?? '字幕 ${index + 1}', subtitles[index].language, subtitles[index].codec]
+      'name': [subtitles[index].title ?? 'Subtitle ${index + 1}', subtitles[index].language, subtitles[index].codec]
         .whereType<String>().where((text) => text.isNotEmpty).join(' · '),
       'selected': subtitles[index].id == values[4],
     }];
     _diagnostics = {
-      'decoder': '自动硬解，不能使用时由引擎回退软件解码',
-      'version': values[7] ?? '未知', 'hwdec': values[8] ?? '未知', 'vo': values[9] ?? '未知',
-      'decoderDrops': values[10] ?? '未知', 'outputDrops': values[11] ?? '未知',
-      'actualRate': values[12] ?? '未知', 'errors': List<String>.from(_errors),
+      'decoderCode': 'automatic_hardware_decode',
+      'version': values[7], 'hwdec': values[8], 'vo': values[9],
+      'decoderDrops': values[10], 'outputDrops': values[11],
+      'actualRate': values[12], 'errors': List<String>.from(_errors),
     };
     final position = double.tryParse(values[0] ?? '') ?? state.position.inMicroseconds / 1000000;
     final duration = double.tryParse(values[1] ?? '') ?? state.duration.inMicroseconds / 1000000;
@@ -339,17 +364,30 @@ class MediaKitPlayback extends ChangeNotifier {
   }
 
   Future<void> _release() async {
+    final player = _player;
+    final subscriptions = List<StreamSubscription<dynamic>>.from(_subscriptions);
+    final timer = _timer;
+    _player = null;
+    _subscriptions.clear();
+    _timer = null;
+    controller = null;
+    engineId = '';
+    _ready = false;
+    _refreshing = false;
     _releasing = true;
     _pipPreviousSwFast = null;
     _pipVideoTrack = null;
-    _timer?.cancel(); _timer = null;
-    controller = null;
+    timer?.cancel();
     if (!_disposed) notifyListeners();
     try {
-      for (final subscription in _subscriptions) { await subscription.cancel(); }
-      _subscriptions.clear();
-      await _player?.dispose();
-      _player = null; engineId = ''; _ready = false;
+      await (() async {
+        for (final subscription in subscriptions) { await subscription.cancel(); }
+        await player?.dispose();
+      })().timeout(const Duration(seconds: 3));
+    } on TimeoutException {
+      _log('release timed out; previous engine quarantined');
+    } catch (error) {
+      _log('release failed: $error');
     } finally { _releasing = false; }
   }
 
@@ -358,8 +396,8 @@ class MediaKitPlayback extends ChangeNotifier {
     _disposed = true; _requestedId = null;
     _channel.setMethodCallHandler(null);
     _timer?.cancel();
-    _commands = _commands.then((_) => _release()).catchError((Object error) { _log('dispose: $error'); });
+    _commandEpoch++;
+    _commands = _release().catchError((Object error) { _log('dispose: $error'); });
     super.dispose();
   }
 }
-

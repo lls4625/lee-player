@@ -61,7 +61,7 @@ class PlayerModel extends ChangeNotifier {
       if (sort != null) 'sort': sort,
       if (ascending != null) 'ascending': ascending,
     }, onValue: applyLibraryPreferences);
-  String? message;
+  AppMessage? message;
   VoidCallback? onOpenPlayer;
   String get path => state['path'] as String? ?? '';
   bool get playing => state['playing'] == true;
@@ -89,10 +89,13 @@ class PlayerModel extends ChangeNotifier {
         case 'import': importProgress = data; break;
         case 'importDone': importProgress = null; break;
         case 'openPlayer': onOpenPlayer?.call(); break;
-        case 'notice': message = data['message'] as String?; break;
+        case 'notice': message = AppMessage.fromMap(data, fallback: data['message'] as String?); break;
       }
       notifyListeners();
-    }, onError: (Object error) { message = '无法连接 iOS 播放服务：$error'; notifyListeners(); });
+    }, onError: (Object error) {
+      message = AppMessage('native_service_disconnected', technicalDetail: '$error');
+      notifyListeners();
+    });
     await command('state', onValue: (value) { state = Map<String, dynamic>.from(value as Map); });
     await loadLibraryPreferences();
     await refresh();
@@ -101,9 +104,14 @@ class PlayerModel extends ChangeNotifier {
     try {
       final dynamic value = await _methods.invokeMethod<dynamic>(method, args);
       onValue?.call(value); notifyListeners(); return true;
-    } on PlatformException catch (error) { message = error.message ?? '操作失败';
-    } on MissingPluginException { message = 'iOS 服务尚未加载，请在 iOS 设备中完整启动应用';
-    } catch (error) { message = '操作失败：$error'; }
+    } on PlatformException catch (error) {
+      final details = error.details;
+      message = details is Map
+        ? AppMessage.fromMap(<dynamic, dynamic>{...details, 'code': error.code}, fallback: error.message)
+        : AppMessage(error.code, fallback: error.message,
+            technicalDetail: details == null ? null : '$details');
+    } on MissingPluginException { message = const AppMessage('native_service_unavailable');
+    } catch (error) { message = AppMessage('operation_failed', technicalDetail: '$error'); }
     notifyListeners(); return false;
   }
   Future<bool> refresh() async {
@@ -142,11 +150,11 @@ class PlayerModel extends ChangeNotifier {
     if (copied && count > 0) {
       final indexed = entries.where((item) => item.parent == parent).map((item) => item.path).toSet();
       if (!refreshed) {
-        message = '已复制 $count 项，但课程库刷新失败，请点击刷新重试，无需重复导入';
+        message = AppMessage('import_refresh_failed', args: {'count': count});
       } else if (importedPaths.length != count || !importedPaths.every(indexed.contains)) {
-        message = '已复制 $count 项，但未能在目标目录核对文件，请完整重启应用后刷新，无需重复导入';
+        message = AppMessage('import_verification_failed', args: {'count': count});
       } else {
-        message = '已导入 $count 项';
+        message = AppMessage('import_completed', args: {'count': count});
       }
       notifyListeners();
     }
