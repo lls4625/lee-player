@@ -28,6 +28,9 @@ class PlayerModel extends ChangeNotifier {
   static const _methods = MethodChannel('lei.player/methods');
   static const _events = EventChannel('lei.player/events');
   StreamSubscription<dynamic>? _subscription;
+  Timer? _eventReconnectTimer;
+  int _eventEpoch = 0, _eventReconnectAttempt = 0;
+  bool _disposed = false;
   List<MediaEntry> entries = [];
   Map<String, Map<String, dynamic>> records = {};
   Map<String, dynamic> state = {};
@@ -75,8 +78,14 @@ class PlayerModel extends ChangeNotifier {
     for (final entry in entries) { if (entry.path == path) return entry; }
     return null;
   }
-  Future<void> initialize() async {
-    _subscription ??= _events.receiveBroadcastStream().listen((dynamic event) {
+  void _connectEvents() {
+    if (_disposed || _subscription != null) return;
+    _eventReconnectTimer?.cancel();
+    _eventReconnectTimer = null;
+    final epoch = ++_eventEpoch;
+    final subscription = _events.receiveBroadcastStream().listen((dynamic event) {
+      if (_disposed || epoch != _eventEpoch) return;
+      _eventReconnectAttempt = 0;
       final data = Map<String, dynamic>.from(event as Map);
       switch (data['type']) {
         case 'player':
@@ -93,9 +102,38 @@ class PlayerModel extends ChangeNotifier {
       }
       notifyListeners();
     }, onError: (Object error) {
+      if (_disposed || epoch != _eventEpoch) return;
       message = AppMessage('native_service_disconnected', technicalDetail: '$error');
       notifyListeners();
+      scheduleMicrotask(() => _disconnectEvents(epoch));
+    }, onDone: () {
+      if (_disposed || epoch != _eventEpoch) return;
+      scheduleMicrotask(() => _disconnectEvents(epoch));
     });
+    _subscription = subscription;
+  }
+  void _disconnectEvents(int epoch) {
+    if (_disposed || epoch != _eventEpoch) return;
+    final subscription = _subscription;
+    if (subscription == null) return;
+    _subscription = null;
+    unawaited(subscription.cancel());
+    final delays = [250, 750, 1500, 3000, 5000];
+    final delayIndex = _eventReconnectAttempt < delays.length
+        ? _eventReconnectAttempt : delays.length - 1;
+    final delay = delays[delayIndex];
+    _eventReconnectAttempt++;
+    _eventReconnectTimer?.cancel();
+    _eventReconnectTimer = Timer(Duration(milliseconds: delay), () async {
+      if (_disposed || epoch != _eventEpoch || _subscription != null) return;
+      _connectEvents();
+      await command('state', onValue: (value) {
+        state = Map<String, dynamic>.from(value as Map);
+      });
+    });
+  }
+  Future<void> initialize() async {
+    _connectEvents();
     await command('state', onValue: (value) { state = Map<String, dynamic>.from(value as Map); });
     await loadLibraryPreferences();
     await refresh();
@@ -176,7 +214,11 @@ class PlayerModel extends ChangeNotifier {
   void consumeMessage() { message = null; }
   @override
   void dispose() {
+    _disposed = true;
+    _eventEpoch++;
+    _eventReconnectTimer?.cancel();
     _subscription?.cancel();
+    _subscription = null;
     mediaKit.removeListener(notifyListeners);
     mediaKit.dispose();
     super.dispose();

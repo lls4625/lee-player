@@ -17,6 +17,7 @@ class MediaKitPlayback extends ChangeNotifier {
   int _commandEpoch = 0;
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   final List<String> _errors = [];
+  final Set<String> _timedOutProperties = {};
   final Stopwatch _clock = Stopwatch();
   Timer? _timer;
   bool _ready = false, _refreshing = false, _disposed = false, _releasing = false;
@@ -111,7 +112,7 @@ class MediaKitPlayback extends ChangeNotifier {
       MediaKit.ensureInitialized();
       engineId = id;
       _clock.reset(); _clock.start();
-      _errors.clear(); _diagnostics = {}; _failure = ''; _ready = false;
+      _errors.clear(); _timedOutProperties.clear(); _diagnostics = {}; _failure = ''; _ready = false;
       final player = Player(configuration: const PlayerConfiguration(libass: true, logLevel: MPVLogLevel.warn));
       _player = player;
       if (args['isAudio'] != true) {
@@ -297,8 +298,12 @@ class MediaKitPlayback extends ChangeNotifier {
 
   Future<String?> _property(NativePlayer native, String name) async {
     try {
-      final value = await native.getProperty(name);
+      final value = await native.getProperty(name).timeout(const Duration(milliseconds: 750));
+      _timedOutProperties.remove(name);
       return value.isEmpty ? null : value;
+    } on TimeoutException {
+      if (_timedOutProperties.add(name)) _log('property timeout: $name');
+      return null;
     } catch (_) { return null; }
   }
 
@@ -342,8 +347,11 @@ class MediaKitPlayback extends ChangeNotifier {
       'engineId': id, 'position': position.isFinite ? position : 0,
       'duration': duration.isFinite ? duration : 0, 'ready': _ready,
       'seekable': values[2] == 'yes' || values[2] == 'true',
-      'playing': (values[5] == 'no' || values[5] == 'false') && values[6] != 'yes' && values[6] != 'true',
-      'buffering': state.buffering, 'ended': values[6] == 'yes' || values[6] == 'true',
+      'playing': values[5] == null
+        ? state.playing
+        : (values[5] == 'no' || values[5] == 'false') && values[6] != 'yes' && values[6] != 'true',
+      'buffering': state.buffering,
+      'ended': values[6] == null ? state.completed : values[6] == 'yes' || values[6] == 'true',
       'failure': _failure, 'diagnostics': _diagnostics,
       'tracks': {'audioTracks': audioRows, 'subtitleTracks': subtitleRows,
         'audioTrack': audio.indexWhere((track) => track.id == values[3]),
@@ -375,6 +383,7 @@ class MediaKitPlayback extends ChangeNotifier {
     _ready = false;
     _refreshing = false;
     _releasing = true;
+    _timedOutProperties.clear();
     _pipPreviousSwFast = null;
     _pipVideoTrack = null;
     timer?.cancel();

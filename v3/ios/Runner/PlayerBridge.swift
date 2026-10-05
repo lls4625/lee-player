@@ -7,10 +7,16 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   private let library: CourseLibrary
   private let playback: PlaybackService
   private let work = DispatchQueue(label: "雷player.library", qos: .userInitiated)
+  private var importWork = DispatchQueue(label: "雷player.import", qos: .userInitiated)
   private var sink: FlutterEventSink?
   private var importResult: FlutterResult?
   private var importParent = ""
   private var busy = false
+  private var importBusy = false
+  private var importToken: UUID?
+  private var importCancellation: ImportCancellation?
+  private var importWatchdog: DispatchWorkItem?
+  private var activeImportResult: FlutterResult?
   private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
   private var pipRestoreCompletion: ((Bool) -> Void)?
   private var pipRestoreToken: UUID?
@@ -121,14 +127,85 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       details: ["technicalDetail": error.localizedDescription])
   }
 
-  private func perform(_ result: @escaping FlutterResult, operation: @escaping () throws -> Any?, completion: ((Any?) -> Void)? = nil) {
-    guard !busy else { result(failure(LibraryFailure.app("file_operation_busy"))); return }
+  private func perform(_ result: @escaping FlutterResult, allowDuringImport: Bool = false,
+                       operation: @escaping () throws -> Any?, completion: ((Any?) -> Void)? = nil) {
+    guard !busy, allowDuringImport || !importBusy else {
+      result(failure(LibraryFailure.app("file_operation_busy"))); return
+    }
     busy = true
     work.async {
       do {
         let value = try operation()
         DispatchQueue.main.async { self.busy = false; completion?(value); result(value) }
       } catch { DispatchQueue.main.async { self.busy = false; result(self.failure(error)) } }
+    }
+  }
+
+  private func armImportWatchdog(_ token: UUID) {
+    importWatchdog?.cancel()
+    let watchdog = DispatchWorkItem { [weak self] in
+      guard let self = self, self.importToken == token, self.importBusy else { return }
+      if let cancellation = self.importCancellation { self.library.cancelImport(cancellation) }
+      self.importToken = nil
+      self.importCancellation = nil
+      self.importBusy = false
+      self.importWork = DispatchQueue(label: "雷player.import.\(UUID().uuidString)", qos: .userInitiated)
+      let callback = self.activeImportResult
+      self.activeImportResult = nil
+      self.importWatchdog = nil
+      self.finishImportPresentation()
+      callback?(self.failure(LibraryFailure.app("import_timeout")))
+    }
+    importWatchdog = watchdog
+    DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: watchdog)
+  }
+
+  private func touchImportWatchdog(_ token: UUID) {
+    guard importToken == token, importBusy else { return }
+    armImportWatchdog(token)
+  }
+
+  private func finishImportPresentation() {
+    sink?(["type": "importDone"])
+    if backgroundTask != .invalid {
+      UIApplication.shared.endBackgroundTask(backgroundTask)
+      backgroundTask = .invalid
+    }
+  }
+
+  private func performImport(_ result: @escaping FlutterResult, token: UUID,
+                             operation: @escaping () throws -> Any?) {
+    guard !busy, !importBusy else {
+      importCancellation = nil
+      finishImportPresentation()
+      result(failure(LibraryFailure.app("file_operation_busy"))); return
+    }
+    importBusy = true
+    importToken = token
+    activeImportResult = result
+    armImportWatchdog(token)
+    let queue = importWork
+    queue.async {
+      do {
+        let value = try operation()
+        DispatchQueue.main.async {
+          guard self.importToken == token else { return }
+          self.importWatchdog?.cancel(); self.importWatchdog = nil
+          self.importToken = nil; self.importCancellation = nil; self.importBusy = false
+          let callback = self.activeImportResult; self.activeImportResult = nil
+          self.finishImportPresentation()
+          callback?(value)
+        }
+      } catch {
+        DispatchQueue.main.async {
+          guard self.importToken == token else { return }
+          self.importWatchdog?.cancel(); self.importWatchdog = nil
+          self.importToken = nil; self.importCancellation = nil; self.importBusy = false
+          let callback = self.activeImportResult; self.activeImportResult = nil
+          self.finishImportPresentation()
+          callback?(self.failure(error))
+        }
+      }
     }
   }
 
@@ -174,12 +251,12 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         defaults.set(ascending, forKey: "library.sortAscending")
         result(["layout": layout, "sort": sort, "ascending": ascending]); return
       case "scan":
-        perform(result, operation: { try self.library.scan() }); return
+        perform(result, allowDuringImport: true, operation: { try self.library.scan() }); return
       case "records": result(library.records); return
       case "state": result(playback.snapshot()); return
       case "playbackInfo": result(playback.playbackInfo()); return
       case "import":
-        guard !busy && importResult == nil else { throw LibraryFailure.app("file_operation_busy") }
+        guard !busy && !importBusy && importResult == nil else { throw LibraryFailure.app("file_operation_busy") }
         guard let controller = topController() else { throw LibraryFailure.app("file_picker_unavailable") }
         importParent = args["parent"] as? String ?? ""
         _ = try library.url(importParent, allowRoot: true)
@@ -190,7 +267,8 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         picker.delegate = self
         importResult = result
         controller.present(picker, animated: true); return
-      case "cancelImport": library.cancelImport()
+      case "cancelImport":
+        if let cancellation = importCancellation { library.cancelImport(cancellation) }
       case "createFolder":
         let parent = args["parent"] as? String ?? "", name = args["name"] as? String ?? ""
         perform(result, operation: { try self.library.createFolder(parent: parent, name: name); return nil }); return
@@ -209,7 +287,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         perform(result, operation: { try self.library.trash(path: path) }, completion: { _ in
           self.playback.stopForMutation(path)
         }); return
-      case "trashList": perform(result, operation: { try self.library.trashList() }); return
+      case "trashList": perform(result, allowDuringImport: true, operation: { try self.library.trashList() }); return
       case "restore":
         let token = args["token"] as? String ?? ""
         perform(result, operation: { try self.library.restore(token: token); return nil }); return
@@ -291,20 +369,22 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     importResult = nil
     guard !urls.isEmpty else { callback(0); return }
     let parent = importParent
-    library.beginImport()
+    let cancellation = library.beginImport()
+    let token = UUID()
+    importCancellation = cancellation
     sink?(["type": "import", "nameCode": "import_preparing", "done": 0, "total": 0])
     backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "课程导入") { [weak self] in
       guard let self = self else { return }
-      self.library.cancelImport()
+      self.library.cancelImport(cancellation)
       if self.backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(self.backgroundTask); self.backgroundTask = .invalid }
     }
-    perform({ value in
-      self.sink?(["type": "importDone"])
-      if self.backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(self.backgroundTask); self.backgroundTask = .invalid }
-      callback(value)
-    }, operation: {
-      let paths = try self.library.importFiles(urls, parent: parent) { name, done, total in
-        DispatchQueue.main.async { self.sink?(["type": "import", "name": name, "done": done, "total": total]) }
+    performImport(callback, token: token, operation: {
+      let paths = try self.library.importFiles(urls, parent: parent, cancellation: cancellation) { name, done, total in
+        DispatchQueue.main.async {
+          guard self.importToken == token else { return }
+          self.touchImportWatchdog(token)
+          self.sink?(["type": "import", "name": name, "done": done, "total": total])
+        }
       }
       return ["count": paths.count, "paths": paths] as [String: Any]
     })

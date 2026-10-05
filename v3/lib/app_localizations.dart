@@ -437,6 +437,12 @@ class AppLocalizations {
       'ja': '書き込みに失敗しました。空き容量を確認してください',
       'en': 'Unable to write the file. Check available storage.',
     },
+    'import_timeout': {
+      'zh-Hans': '导入长时间没有进展，已停止等待并恢复课程库操作。文件稍后可能出现，请刷新确认后再决定是否重新导入',
+      'zh-Hant': '匯入長時間沒有進度，已停止等待並恢復課程庫操作。檔案稍後可能出現，請更新確認後再決定是否重新匯入',
+      'ja': '読み込みが長時間進まなかったため、待機を終了してライブラリ操作を復旧しました。後からファイルが表示される場合があります。再読み込みの前に更新して確認してください',
+      'en': 'Import made no progress for too long. Library access was restored. The files may appear later; refresh before importing again.',
+    },
     'import_partial_failure': {
       'zh-Hans': '{reason}；此前已完成 {completed} 项',
       'zh-Hant': '{reason}；此前已完成 {completed} 項',

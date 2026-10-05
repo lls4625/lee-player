@@ -25,13 +25,20 @@ enum LibraryFailure: LocalizedError {
   var errorDescription: String? { technicalDetail ?? code }
 }
 
-/// All filesystem work is serialized by PlayerBridge; UI metadata is main-thread owned.
+final class ImportCancellation {
+  private let lock = NSLock()
+  private var cancelled = false
+
+  func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+  var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+}
+
+/// Local library mutations are serialized by PlayerBridge. Imports use isolated
+/// staging directories and per-task cancellation so a stalled provider can be quarantined.
 final class CourseLibrary {
   let root: URL
   let support: URL
   private let fm = FileManager.default
-  private let cancellation = NSLock()
-  private var cancelled = false
   var records: [String: [String: Any]] = [:]
   let audioExtensions: Set<String> = ["mp3", "m4a", "aac", "flac", "wav", "aiff", "aif", "ogg", "opus", "wma", "ape", "alac", "ac3", "eac3", "dts"]
   let videoExtensions: Set<String> = ["mp4", "mov", "m4v", "mkv", "flv", "avi", "webm", "ts", "m2ts", "mts", "mpeg", "mpg", "3gp", "wmv", "vob"]
@@ -226,28 +233,29 @@ final class CourseLibrary {
     if recordsChanged { save() }
   }
 
-  func beginImport() { cancellation.lock(); cancelled = false; cancellation.unlock() }
-  func cancelImport() { cancellation.lock(); cancelled = true; cancellation.unlock() }
-  private func checkCancellation() throws {
-    cancellation.lock(); let value = cancelled; cancellation.unlock()
-    if value { throw LibraryFailure.app("import_cancelled") }
+  func beginImport() -> ImportCancellation { ImportCancellation() }
+  func cancelImport(_ cancellation: ImportCancellation) { cancellation.cancel() }
+  private func checkCancellation(_ cancellation: ImportCancellation) throws {
+    if cancellation.isCancelled { throw LibraryFailure.app("import_cancelled") }
   }
 
   /// Stage each selection outside Documents; only complete selections become visible.
-  func importFiles(_ sources: [URL], parent: String, progress: @escaping (String, Int64, Int64) -> Void) throws -> [String] {
+  func importFiles(_ sources: [URL], parent: String, cancellation: ImportCancellation,
+                   progress: @escaping (String, Int64, Int64) -> Void) throws -> [String] {
     let destination = try url(parent, allowRoot: true)
     let staging = support.appendingPathComponent("Import-" + UUID().uuidString, isDirectory: true)
     try fm.createDirectory(at: staging, withIntermediateDirectories: true)
     defer { try? fm.removeItem(at: staging) }
     var imported: [String] = []
     for source in sources {
-      try checkCancellation()
+      try checkCancellation(cancellation)
       let accessible = source.startAccessingSecurityScopedResource()
       defer { if accessible { source.stopAccessingSecurityScopedResource() } }
       var coordinationError: NSError?
       var operationError: Error?
       NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: source, options: [], error: &coordinationError) { coordinated in
         do {
+          try self.checkCancellation(cancellation)
           var directoryFlag: ObjCBool = false
           guard self.fm.fileExists(atPath: coordinated.path, isDirectory: &directoryFlag) else {
             throw LibraryFailure.app("selected_file_unavailable")
@@ -261,7 +269,7 @@ final class CourseLibrary {
             var enumerationError: Error?
             let enumerator = self.fm.enumerator(at: coordinated, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles], errorHandler: { _, error in enumerationError = error; return false })
             while let file = enumerator?.nextObject() as? URL {
-              try self.checkCancellation()
+              try self.checkCancellation(cancellation)
               let values = try file.resourceValues(forKeys: keys)
               if values.isSymbolicLink == true { enumerator?.skipDescendants(); continue }
               files.append(file)
@@ -279,7 +287,7 @@ final class CourseLibrary {
           var completed: Int64 = 0
           var lastProgress = Date.distantPast
           for file in files {
-            try self.checkCancellation()
+            try self.checkCancellation(cancellation)
             let relative: String
             if directoryFlag.boolValue { relative = try self.relativePath(file, inside: coordinated) }
             else { relative = "" }
@@ -295,7 +303,7 @@ final class CourseLibrary {
             defer { input.close(); output.close() }
             var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
             while true {
-              try self.checkCancellation()
+              try self.checkCancellation(cancellation)
               let count = input.read(&buffer, maxLength: buffer.count)
               if count == 0 { break }
               if count < 0 { throw input.streamError ?? LibraryFailure.app("import_read_failed") }
@@ -312,7 +320,7 @@ final class CourseLibrary {
             }
             try self.fm.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: target.path)
           }
-          try self.checkCancellation()
+          try self.checkCancellation(cancellation)
           var target = destination.appendingPathComponent(source.lastPathComponent)
           var suffix = 2
           while self.fm.fileExists(atPath: target.path) {

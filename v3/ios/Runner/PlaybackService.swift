@@ -532,6 +532,13 @@ final class PlaybackService: NSObject {
     generation += 1
     let token = generation
     player.pause(); timelineReady = false; loading = true; wantsPlayback = autoplay; errorMessage = ""
+    // An interruption belongs to the audio session, not to the media item. If the
+    // user switches items while it is active, carry the new playback intent so an
+    // eventual .ended notification resumes the new item instead of the old one.
+    if interrupted {
+      resumeAfterInterruption = autoplay
+      audioRecoveryPending = autoplay
+    }
     observations = Array(observations.prefix(1))
     player.replaceCurrentItem(with: nil)
     aPoint = nil; bPoint = nil
@@ -706,12 +713,29 @@ final class PlaybackService: NSObject {
       publish()
       return
     }
-    guard !interrupted else {
-      audioRecoveryPending = true
-      errorMessage = ""
-      pauseEngine()
-      publish()
-      return
+    if interrupted {
+      // iOS can omit the matching .ended notification (for example when the app
+      // changes lifecycle state or the media item is replaced during a call).
+      // An explicit play/recovery request must be allowed to revalidate the audio
+      // session; otherwise the stale flag makes every later media item unplayable.
+      guard resetAttempts, UIApplication.shared.applicationState == .active else {
+        audioRecoveryPending = true
+        errorMessage = ""
+        pauseEngine()
+        publish()
+        return
+      }
+      do {
+        try activateAudioSession()
+        lastDiagnostic = "stale audio interruption cleared after session reactivation"
+      } catch {
+        lastDiagnostic = error.localizedDescription
+        audioRecoveryPending = true
+        errorMessage = ""
+        pauseEngine()
+        publish()
+        return
+      }
     }
     if resetAttempts {
       audioRecoveryWorkItem?.cancel()
@@ -1081,6 +1105,9 @@ final class PlaybackService: NSObject {
       interrupted = true; scrubbing = false; errorMessage = ""
       pauseEngine(); persist(); publish()
     } else {
+      // Ignore duplicate or delayed end notifications after another recovery path
+      // has already reactivated the session and cleared the interruption.
+      guard interrupted else { return }
       interrupted = false
       let options = AVAudioSession.InterruptionOptions(rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
       let resume = resumeAfterInterruption && wantsPlayback && autoResume && options.contains(.shouldResume)
