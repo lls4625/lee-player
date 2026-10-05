@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -55,10 +57,10 @@ class LegalDocumentPage extends StatelessWidget {
               separatorBuilder: (_, _) => const SizedBox(height: 18),
               itemBuilder: (context, index) {
                 final block = blocks[index].trim();
-                final heading = RegExp(
-                  r'^(?:[一二三四五六七八九十]+、|\d+[.、])',
-                ).hasMatch(block);
-                final metadata = index == 0 &&
+                final heading = RegExp(r'^(?:[一二三四五六七八九十]+、|\d+[.、])')
+                    .hasMatch(block);
+                final metadata =
+                    index == 0 &&
                     (block.contains('生效日期：') ||
                         block.contains('Effective:') ||
                         block.contains('発効日：'));
@@ -177,7 +179,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     m.addListener(changed);
     m.onOpenPlayer = showPlayer;
-    m.initialize();
+    unawaited(m.initialize());
   }
 
   void changed() {
@@ -194,7 +196,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) m.refresh();
+    if (state == AppLifecycleState.resumed) unawaited(m.refresh());
   }
 
   @override
@@ -214,15 +216,22 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     );
   }
 
-  Future<void> showPlayer() async {
+  Future<void> acknowledgePiPRestore(String? restoreToken) async {
+    await m.command(
+      'pipRestored',
+      args: restoreToken == null ? null : {'restoreToken': restoreToken},
+    );
+  }
+
+  Future<void> showPlayer([String? restoreToken]) async {
     if (!mounted || m.path.isEmpty) return;
     if (playerVisible) {
-      await m.command('pipRestored');
+      await acknowledgePiPRestore(restoreToken);
       return;
     }
     playerVisible = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) m.command('pipRestored');
+      if (mounted) unawaited(acknowledgePiPRestore(restoreToken));
     });
     await Navigator.of(context)
         .push(MaterialPageRoute<void>(builder: (_) => PlaybackPage(model: m)));
@@ -301,26 +310,27 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
 
   Future<String?> input(String title, {String value = ''}) async {
     final controller = TextEditingController(text: value);
+    var submitted = false;
+    void submit(String? value) {
+      if (submitted) return;
+      submitted = true;
+      final navigator = Navigator.of(context, rootNavigator: true);
+      if (navigator.canPop()) navigator.pop(value);
+    }
+
     final result = await showLeiDialog<String>(
       context: context,
       title: title,
       content: GlassTextField(
         controller: controller,
         autofocus: true,
-        onSubmitted: (value) =>
-            Navigator.of(context, rootNavigator: true).pop(value.trim()),
+        onSubmitted: (value) => submit(value.trim()),
       ),
       actions: [
-        GlassDialogAction(
-          label: '取消',
-          onPressed: () => Navigator.of(context, rootNavigator: true).pop(),
-        ),
+        GlassDialogAction(label: '取消', onPressed: () => submit(null)),
         GlassDialogAction(
           label: '确定',
-          onPressed: () => Navigator.of(
-            context,
-            rootNavigator: true,
-          ).pop(controller.text.trim()),
+          onPressed: () => submit(controller.text.trim()),
         ),
       ],
     );
@@ -420,7 +430,8 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       (e.modified * 1000).round(),
     ).toLocal();
     final material = MaterialLocalizations.of(context);
-    final modifiedLabel = '${material.formatFullDate(modified)} '
+    final modifiedLabel =
+        '${material.formatFullDate(modified)} '
         '${material.formatTimeOfDay(TimeOfDay.fromDateTime(modified))}';
     await showLeiDialog<void>(
       context: context,
@@ -718,23 +729,23 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     final currentText = localizations.text(currentLabel);
     final titleText = localizations.text('语言');
     final textScaler = MediaQuery.textScalerOf(context);
-    final availableHeight = MediaQuery.sizeOf(context).height -
+    final availableHeight =
+        MediaQuery.sizeOf(context).height -
         MediaQuery.paddingOf(context).vertical -
         24;
     final naturalItemHeight = textScaler.scale(17) * 1.35 + 16;
     final itemHeight = naturalItemHeight < 48 ? 48.0 : naturalItemHeight;
-    final menuHeight = (24 + options.length * itemHeight +
-            (options.length - 1) * 2)
-        .clamp(0.0, availableHeight)
-        .toDouble();
+    final menuHeight =
+        (24 + options.length * itemHeight + (options.length - 1) * 2)
+            .clamp(0.0, availableHeight)
+            .toDouble();
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final fieldWidth = constraints.maxWidth > 16
             ? constraints.maxWidth - 16
             : constraints.maxWidth;
-        final stacked = fieldWidth < 300 ||
-            textScaler.scale(16) > 22;
+        final stacked = fieldWidth < 300 || textScaler.scale(16) > 22;
         final menuWidth = fieldWidth < 220
             ? fieldWidth
             : fieldWidth.clamp(220.0, 300.0).toDouble();
@@ -998,10 +1009,9 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     final code = AppLocalizations.of(context).code;
     final localizedAsset = code == 'zh-Hans'
         ? asset
-        : asset.replaceFirst('.txt', '.$code.txt').replaceFirst(
-            'assets/legal/',
-            'assets/legal/l10n/',
-          );
+        : asset
+              .replaceFirst('.txt', '.$code.txt')
+              .replaceFirst('assets/legal/', 'assets/legal/l10n/');
     final content = await rootBundle.loadString(localizedAsset);
     if (!mounted) return;
     await Navigator.of(context)
@@ -1525,7 +1535,11 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     padding: const EdgeInsets.all(24),
     child: LeiSurface(
       child: SizedBox(
-        key: const Key('library-empty-content'),
+        key: Key(
+          m.initializing
+              ? 'library-initializing-content'
+              : 'library-empty-content',
+        ),
         width: double.infinity,
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1540,7 +1554,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
             ),
             const SizedBox(height: 16),
             LText(
-              m.scanning
+              m.initializing || m.scanning
                   ? '正在读取课程…'
                   : tab == 1
                   ? '还没有播放记录'
@@ -1552,7 +1566,9 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
             ),
             const SizedBox(height: 8),
             LText(
-              tab == 0
+              m.initializing
+                  ? '正在加载偏好与课程索引。'
+                  : tab == 0
                   ? '通过右上角菜单导入课程或新建文件夹。'
                   : tab == 1
                   ? '播放过的课程会出现在这里。'
@@ -1696,9 +1712,11 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     final total = (m.importProgress?['total'] as num?)?.toInt() ?? 0;
     final progressName = m.importProgress?['name'] as String?;
     final progressCode = m.importProgress?['nameCode'] as String?;
-    final title = progressName ?? (progressCode == null
-        ? AppLocalizations.of(context).text('请选择要导入的文件')
-        : AppLocalizations.of(context).message(AppMessage(progressCode)));
+    final title =
+        progressName ??
+        (progressCode == null
+            ? AppLocalizations.of(context).text('请选择要导入的文件')
+            : AppLocalizations.of(context).message(AppMessage(progressCode)));
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
       child: LeiSurface(
@@ -1709,11 +1727,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           children: [
             LeiGlassTile(
               dense: true,
-              title: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
+              title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
               subtitle: LText(
                 total > 0
                     ? '${sizeLabel(done)} / ${sizeLabel(total)}'

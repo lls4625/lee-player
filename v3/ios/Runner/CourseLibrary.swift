@@ -33,12 +33,29 @@ final class ImportCancellation {
   var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
 }
 
+struct LibraryScanSnapshot {
+  let items: [[String: Any]]
+  let warnings: [[String: Any]]
+  let protectionPaths: [String]
+}
+
 /// Local library mutations are serialized by PlayerBridge. Imports use isolated
 /// staging directories and per-task cancellation so a stalled provider can be quarantined.
 final class CourseLibrary {
   let root: URL
   let support: URL
   private let fm = FileManager.default
+  private let protectionWork: OperationQueue = {
+    let queue = OperationQueue()
+    queue.name = "雷player.protection"
+    queue.qualityOfService = .utility
+    queue.maxConcurrentOperationCount = 2
+    return queue
+  }()
+  private let protectionSubmissionQueue = DispatchQueue(
+    label: "雷player.protection.submit", qos: .utility)
+  private let protectionLock = NSLock()
+  private var pendingProtectionPaths: Set<String> = []
   var records: [String: [String: Any]] = [:]
   let audioExtensions: Set<String> = ["mp3", "m4a", "aac", "flac", "wav", "aiff", "aif", "ogg", "opus", "wma", "ape", "alac", "ac3", "eac3", "dts"]
   let videoExtensions: Set<String> = ["mp4", "mov", "m4v", "mkv", "flv", "avi", "webm", "ts", "m2ts", "mts", "mpeg", "mpg", "3gp", "wmv", "vob"]
@@ -52,6 +69,19 @@ final class CourseLibrary {
     try fm.createDirectory(at: support, withIntermediateDirectories: true)
     try fm.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: root.path)
     if let data = try? Data(contentsOf: support.appendingPathComponent("library.json")),
+       let value = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
+      records = value
+    }
+  }
+
+  /// Test-only-friendly initializer. Production continues to use the sandbox
+  /// Documents/Application Support locations above.
+  init(root: URL, support: URL) throws {
+    self.root = root.standardizedFileURL.resolvingSymlinksInPath()
+    self.support = support.standardizedFileURL.resolvingSymlinksInPath()
+    try fm.createDirectory(at: self.root, withIntermediateDirectories: true)
+    try fm.createDirectory(at: self.support, withIntermediateDirectories: true)
+    if let data = try? Data(contentsOf: self.support.appendingPathComponent("library.json")),
        let value = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] {
       records = value
     }
@@ -86,33 +116,90 @@ final class CourseLibrary {
     try relativePath(url, inside: root)
   }
 
-  func scan() throws -> [[String: Any]] {
+  func normalizeProtection(path: String) throws {
+    let file = try url(path)
+    try fm.setAttributes([
+      .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication,
+    ], ofItemAtPath: file.path)
+  }
+
+  func scheduleProtectionNormalization(paths: [String]) {
+    guard !paths.isEmpty else { return }
+    // Keep the caller (normally the main thread after scan/open) O(1). Path
+    // de-duplication and OperationQueue submission happen in one background batch.
+    protectionSubmissionQueue.async { [weak self] in
+      self?.enqueueProtectionNormalization(paths: paths)
+    }
+  }
+
+  private func enqueueProtectionNormalization(paths: [String]) {
+    for path in paths {
+      protectionLock.lock()
+      let inserted = pendingProtectionPaths.insert(path).inserted
+      protectionLock.unlock()
+      guard inserted else { continue }
+      protectionWork.addOperation { [weak self] in
+        guard let self = self else { return }
+        defer {
+          self.protectionLock.lock()
+          self.pendingProtectionPaths.remove(path)
+          self.protectionLock.unlock()
+        }
+        do { try self.normalizeProtection(path: path) }
+        catch { NSLog("雷player: 文件保护属性更新失败 %@ %@", path, error.localizedDescription) }
+      }
+    }
+  }
+
+  /// Pure discovery: it does not normalize protection attributes or mutate
+  /// records, so PlayerBridge may quarantine a timed-out scan safely.
+  func scanSnapshot() throws -> LibraryScanSnapshot {
     let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]
-    var scanError: Error?
+    var warnings: [[String: Any]] = []
+    var protectionPaths: [String] = []
+    var protectionDirectories: [String] = []
     guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: keys,
       options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { _, error in
-        scanError = error; return false
+        warnings.append([
+          "code": "library_item_unreadable",
+          "technicalDetail": error.localizedDescription,
+        ])
+        // A provider or damaged directory must not hide otherwise healthy items.
+        return true
       }) else { throw LibraryFailure.app("library_read_failed") }
     var items: [[String: Any]] = []
     for case let file as URL in enumerator {
-      let values = try file.resourceValues(forKeys: Set(keys))
-      if values.isSymbolicLink == true { enumerator.skipDescendants(); continue }
-      let directory = values.isDirectory == true
-      let ext = file.pathExtension.lowercased()
-      let type = directory ? "folder" : videoExtensions.contains(ext) ? "video" : audioExtensions.contains(ext) ? "audio" : ["srt", "vtt", "ass", "ssa", "sup"].contains(ext) ? "subtitle" : "other"
-      // Finder / Files transfers also need to remain readable across screen locking.
-      if directory || type == "video" || type == "audio" || type == "subtitle" {
-        try fm.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: file.path)
+      do {
+        if try file.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true {
+          warnings.append(["code": "symbolic_link_unsupported",
+            "path": (try? relative(file)) ?? file.lastPathComponent])
+          enumerator.skipDescendants()
+          continue
+        }
+        let values = try file.resourceValues(forKeys: Set(keys))
+        let directory = values.isDirectory == true
+        let ext = file.pathExtension.lowercased()
+        let type = directory ? "folder" : videoExtensions.contains(ext) ? "video" : audioExtensions.contains(ext) ? "audio" : ["srt", "vtt", "ass", "ssa", "sup"].contains(ext) ? "subtitle" : "other"
+        let path = try relative(file)
+        // Derive parent from the same relative path consumed by Flutter.
+        let parent = path.split(separator: "/").dropLast().joined(separator: "/")
+        items.append(["path": path, "name": file.lastPathComponent,
+          "parent": parent,
+          "kind": type, "size": values.fileSize ?? 0,
+          "modified": values.contentModificationDate?.timeIntervalSince1970 ?? 0])
+        if directory { protectionDirectories.append(path) }
+        else if type == "video" || type == "audio" || type == "subtitle" {
+          protectionPaths.append(path)
+        }
+      } catch {
+        warnings.append(["code": "library_item_unreadable",
+          "path": (try? relative(file)) ?? file.lastPathComponent,
+          "technicalDetail": error.localizedDescription])
+        if (try? file.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+          enumerator.skipDescendants()
+        }
       }
-      let path = try relative(file)
-      // Derive parent from the same relative path consumed by Flutter.
-      let parent = path.split(separator: "/").dropLast().joined(separator: "/")
-      items.append(["path": path, "name": file.lastPathComponent,
-        "parent": parent,
-        "kind": type, "size": values.fileSize ?? 0,
-        "modified": values.contentModificationDate?.timeIntervalSince1970 ?? 0])
     }
-    if let error = scanError { throw error }
     var folderSizes: [String: Int] = [:]
     for item in items where item["kind"] as? String != "folder" {
       let size = item["size"] as? Int ?? 0
@@ -127,9 +214,11 @@ final class CourseLibrary {
       let path = items[index]["path"] as? String ?? ""
       items[index]["size"] = folderSizes[path] ?? 0
     }
-    return items.sorted {
+    let sorted = items.sorted {
       ($0["path"] as! String).localizedStandardCompare($1["path"] as! String) == .orderedAscending
     }
+    return LibraryScanSnapshot(items: sorted, warnings: warnings,
+      protectionPaths: protectionPaths + protectionDirectories)
   }
 
   func validName(_ name: String) throws -> String {

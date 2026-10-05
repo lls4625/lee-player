@@ -17,6 +17,7 @@
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		AA1000000000000000000001 /* DeveloperTipsStoreKitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000001 /* DeveloperTipsStoreKitTests.swift */; };
 		AA1000000000000000000002 /* DeveloperTips.storekit in Resources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000007 /* DeveloperTips.storekit */; };
+		AA1000000000000000000003 /* NativeRecoveryPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000003 /* NativeRecoveryPolicyTests.swift */; };
 		AE1100000000000000000001 /* CourseLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000001 /* CourseLibrary.swift */; };
 		AE1100000000000000000002 /* PlaybackService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000002 /* PlaybackService.swift */; };
 		AE1100000000000000000003 /* PlayerBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000003 /* PlayerBridge.swift */; };
@@ -69,6 +70,7 @@
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA2000000000000000000001 /* DeveloperTipsStoreKitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeveloperTipsStoreKitTests.swift; sourceTree = "<group>"; };
 		AA2000000000000000000002 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA2000000000000000000003 /* NativeRecoveryPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRecoveryPolicyTests.swift; sourceTree = "<group>"; };
 		AE2200000000000000000001 /* CourseLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CourseLibrary.swift; sourceTree = "<group>"; };
 		AE2200000000000000000002 /* PlaybackService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackService.swift; sourceTree = "<group>"; };
 		AE2200000000000000000003 /* PlayerBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerBridge.swift; sourceTree = "<group>"; };
@@ -174,6 +176,7 @@
 			isa = PBXGroup;
 			children = (
 				AA2000000000000000000001 /* DeveloperTipsStoreKitTests.swift */,
+				AA2000000000000000000003 /* NativeRecoveryPolicyTests.swift */,
 			);
 			path = RunnerTests;
 			sourceTree = "<group>";
@@ -387,6 +390,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA1000000000000000000001 /* DeveloperTipsStoreKitTests.swift in Sources */,
+				AA1000000000000000000003 /* NativeRecoveryPolicyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

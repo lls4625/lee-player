@@ -11,7 +11,6 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await LiquidGlassWidgets.initialize(enablePerformanceMonitor: false);
   final model = PlayerModel();
-  await Future.wait([model.loadAppearance(), model.loadLanguage()]);
   runApp(
     LiquidGlassWidgets.wrap(
       brightnessResolver: Theme.maybeBrightnessOf,

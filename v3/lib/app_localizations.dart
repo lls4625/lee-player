@@ -126,10 +126,16 @@ class AppLocalizations {
   }
 
   String message(AppMessage message) {
-    final template = _appMessages[message.code]?[code];
+    final messageCode =
+        message.code == 'operation_timeout' &&
+            message.args['outcomeUnknown'] != true
+        ? 'operation_timeout_read'
+        : message.code;
+    final template = _appMessages[messageCode]?[code];
     if (template == null) {
       final fallback = message.fallback;
-      if (code == 'zh-Hans' && fallback != null && fallback.isNotEmpty) return fallback;
+      if (code == 'zh-Hans' && fallback != null && fallback.isNotEmpty)
+        return fallback;
       return _appMessages['operation_failed']![code]!;
     }
     var value = template;
@@ -137,12 +143,14 @@ class AppLocalizations {
     final reasonCode = args['reasonCode'];
     final reasonArgs = args['reasonArgs'];
     if (reasonCode is String) {
-      args['reason'] = this.message(AppMessage(
-        reasonCode,
-        args: reasonArgs is Map
-            ? reasonArgs.map((key, value) => MapEntry('$key', value))
-            : const <String, Object?>{},
-      ));
+      args['reason'] = this.message(
+        AppMessage(
+          reasonCode,
+          args: reasonArgs is Map
+              ? reasonArgs.map((key, value) => MapEntry('$key', value))
+              : const <String, Object?>{},
+        ),
+      );
     }
     for (final entry in args.entries) {
       value = value.replaceAll('{${entry.key}}', '${entry.value ?? ''}');
@@ -292,6 +300,60 @@ class AppLocalizations {
       'ja': '操作に失敗しました。もう一度お試しください',
       'en': 'The operation failed. Try again.',
     },
+    'operation_timeout': {
+      'zh-Hans': '文件操作超时，结果尚未确认。请等待或刷新确认，不要重复提交',
+      'zh-Hant': '檔案操作逾時，結果尚未確認。請等待或重新整理確認，不要重複送出',
+      'ja': 'ファイル操作がタイムアウトし、結果はまだ確認できません。待機または更新して確認し、再送信しないでください',
+      'en': 'The file operation timed out and its result is not confirmed. Wait or refresh to verify it; do not submit it again.',
+    },
+    'operation_timeout_read': {
+      'zh-Hans': '读取超时，请稍后刷新',
+      'zh-Hant': '讀取逾時，請稍後重新整理',
+      'ja': '読み込みがタイムアウトしました。後で更新してください',
+      'en': 'Reading timed out. Refresh again later.',
+    },
+    'operation_already_submitted': {
+      'zh-Hans': '该操作已提交，请等待结果，不要重复操作',
+      'zh-Hant': '該操作已送出，請等待結果，不要重複操作',
+      'ja': 'この操作は送信済みです。結果を待ち、繰り返さないでください',
+      'en': 'This operation was already submitted. Wait for its result and do not repeat it.',
+    },
+    'operation_late_completed': {
+      'zh-Hans': '之前未确认的文件操作已完成，正在刷新课程库',
+      'zh-Hant': '之前未確認的檔案操作已完成，正在重新整理課程庫',
+      'ja': '確認待ちだったファイル操作が完了し、ライブラリーを更新しています',
+      'en': 'The previously unconfirmed file operation completed. Refreshing the library now.',
+    },
+    'library_item_unreadable': {
+      'zh-Hans': '有 {count} 个项目无法读取，其他课程已正常显示',
+      'zh-Hant': '有 {count} 個項目無法讀取，其他課程已正常顯示',
+      'ja': '{count} 件の項目を読み込めませんでした。その他のコースは表示されています',
+      'en': '{count} item(s) could not be read. The rest of the library is shown.',
+    },
+    'invalid_operation_id': {
+      'zh-Hans': '操作标识无效，未执行文件操作',
+      'zh-Hant': '操作識別碼無效，未執行檔案操作',
+      'ja': '操作 ID が無効なため、ファイル操作は実行されませんでした',
+      'en': 'The operation ID was invalid, so no file operation was performed.',
+    },
+    'audio_recovery_failed': {
+      'zh-Hans': '音频自动恢复失败，可点击播放手动重试',
+      'zh-Hant': '音訊自動恢復失敗，可點擊播放手動重試',
+      'ja': '音声を自動復帰できませんでした。再生をタップして再試行できます',
+      'en': 'Automatic audio recovery failed. Tap play to try again manually.',
+    },
+    'media_engine_cleanup_failed': {
+      'zh-Hans': '旧播放引擎未能安全释放，已拒绝打开新媒体',
+      'zh-Hant': '舊播放引擎未能安全釋放，已拒絕開啟新媒體',
+      'ja': '以前の再生エンジンを安全に解放できないため、新しいメディアを開きませんでした',
+      'en': 'The previous playback engine could not be released safely, so the new media was not opened.',
+    },
+    'pip_restore_stale': {
+      'zh-Hans': '画中画恢复请求已过期',
+      'zh-Hant': '畫中畫恢復請求已過期',
+      'ja': 'Picture in Picture の復帰リクエストは期限切れです',
+      'en': 'The Picture in Picture restore request expired.',
+    },
     'native_service_disconnected': {
       'zh-Hans': '无法连接 iOS 播放服务',
       'zh-Hant': '無法連線 iOS 播放服務',
@@ -408,10 +470,10 @@ class AppLocalizations {
           'The selected file is unavailable. Download it to this device first.',
     },
     'symbolic_link_unsupported': {
-      'zh-Hans': '不能导入符号链接，请选择原文件',
-      'zh-Hant': '不能匯入符號連結，請選擇原始檔案',
-      'ja': 'シンボリックリンクは読み込めません。元のファイルを選択してください',
-      'en': 'Symbolic links cannot be imported. Choose the original file.',
+      'zh-Hans': '符号链接不受支持，已跳过；请使用原文件',
+      'zh-Hant': '不支援符號連結，已略過；請使用原始檔案',
+      'ja': 'シンボリックリンクはサポートされないためスキップしました。元のファイルを使用してください',
+      'en': 'A symbolic link was skipped because it is unsupported. Use the original file.',
     },
     'storage_insufficient': {
       'zh-Hans': '剩余空间不足，导入需要约 {requiredMB} MB',

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:leeplayer/player_model.dart';
@@ -112,6 +114,131 @@ void main() {
             .setMockMethodCallHandler(methods, (call) async => false);
 
         expect(await PlayerModel().seek(42), isFalse);
+      },
+    );
+
+    test(
+      'scan timeout releases busy state and ignores a late result',
+      () async {
+        final scan = Completer<Object?>();
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(methods, (call) async {
+              if (call.method == 'scan') return scan.future;
+              if (call.method == 'records') return <String, Object>{};
+              return null;
+            });
+        final model = PlayerModel(
+          commandTimeouts: {'scan': const Duration(milliseconds: 10)},
+        );
+        addTearDown(model.dispose);
+
+        final refreshing = model.refresh();
+        await Future<void>.delayed(Duration.zero);
+        expect(model.scanning, isTrue);
+        expect(await refreshing, isFalse);
+        expect(model.scanning, isFalse);
+        expect(model.message?.code, 'operation_timeout');
+
+        scan.complete(<Object>[
+          <String, Object>{
+            'path': '迟到.mp4',
+            'name': '迟到.mp4',
+            'parent': '',
+            'kind': 'video',
+            'size': 1,
+            'modified': 1.0,
+          },
+        ]);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(model.entries, isEmpty);
+      },
+    );
+
+    test(
+      'refresh during a scan is coalesced into one supplemental scan',
+      () async {
+        final scans = <Completer<Object?>>[];
+        var scanCalls = 0;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(methods, (call) async {
+              if (call.method == 'scan') {
+                scanCalls++;
+                final completer = Completer<Object?>();
+                scans.add(completer);
+                return completer.future;
+              }
+              if (call.method == 'records') return <String, Object>{};
+              return null;
+            });
+        final model = PlayerModel();
+        addTearDown(model.dispose);
+
+        final first = model.refresh();
+        await Future<void>.delayed(Duration.zero);
+        final second = model.refresh();
+        expect(scanCalls, 1);
+        scans.first.complete(<Object>[]);
+        while (scanCalls < 2) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        scans[1].complete(<Object>[]);
+
+        expect(await first, isTrue);
+        expect(await second, isTrue);
+        expect(scanCalls, 2);
+        expect(model.scanning, isFalse);
+      },
+    );
+
+    test(
+      'a picker wait is not cut off by ordinary command deadlines',
+      () async {
+        final picker = Completer<Object?>();
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(methods, (call) async {
+              return switch (call.method) {
+                'import' => picker.future,
+                'scan' => <Object>[],
+                'records' => <String, Object>{},
+                _ => null,
+              };
+            });
+        final model = PlayerModel(
+          commandTimeouts: {'import': const Duration(milliseconds: 5)},
+        );
+        addTearDown(model.dispose);
+
+        final importing = model.importMedia(folder: false, parent: '');
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(model.importing, isTrue);
+        picker.complete(0);
+        await importing;
+        expect(model.importing, isFalse);
+      },
+    );
+
+    test(
+      'a reply arriving after dispose cannot notify or mutate state',
+      () async {
+        final reply = Completer<Object?>();
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(methods, (_) async => reply.future);
+        final model = PlayerModel();
+        var notifications = 0;
+        model.addListener(() => notifications++);
+
+        final pending = model.command(
+          'state',
+          onValue: (value) {
+            model.state = Map<String, dynamic>.from(value as Map);
+          },
+        );
+        model.dispose();
+        reply.complete(<String, Object>{'path': '不应写入'});
+
+        expect(await pending, isFalse);
+        expect(notifications, 0);
+        expect(model.state, isEmpty);
       },
     );
   });

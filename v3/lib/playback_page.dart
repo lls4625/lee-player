@@ -12,6 +12,18 @@ String _playbackRateLabel(double rate) {
   return (ticks / 20).toStringAsFixed(ticks.isEven ? 1 : 2);
 }
 
+const playbackExitOrientations = <DeviceOrientation>[
+  DeviceOrientation.portraitUp,
+  DeviceOrientation.portraitDown,
+  DeviceOrientation.landscapeLeft,
+  DeviceOrientation.landscapeRight,
+];
+
+List<DeviceOrientation> playbackOrientationTargets(Orientation current) =>
+  current == Orientation.landscape
+    ? const [DeviceOrientation.portraitUp, DeviceOrientation.portraitDown]
+    : const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight];
+
 class PlaybackPage extends StatefulWidget {
   const PlaybackPage({super.key, required this.model});
   final PlayerModel model;
@@ -34,6 +46,7 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
   static const presets = [5, 15, 30, 45, 60, 90];
   late final TextEditingController controller;
   String? errorText;
+  bool submitted = false;
 
   int? get enteredMinutes => int.tryParse(controller.text);
 
@@ -56,6 +69,13 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
     return rest == 0 ? '$hours 小时' : '$hours 小时 $rest 分钟';
   }
 
+  void close([double? result]) {
+    if (submitted) return;
+    submitted = true;
+    final navigator = Navigator.of(context, rootNavigator: true);
+    if (navigator.canPop()) navigator.pop(result);
+  }
+
   void selectPreset(int minutes) {
     setState(() {
       controller.text = '$minutes';
@@ -65,12 +85,13 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
   }
 
   void submit() {
+    if (submitted) return;
     final minutes = enteredMinutes;
     if (minutes == null || minutes < 1 || minutes > 1440) {
       setState(() => errorText = '请输入 1～1440 之间的整数');
       return;
     }
-    Navigator.of(context, rootNavigator: true).pop(minutes.toDouble());
+    close(minutes.toDouble());
   }
 
   Widget presetButton(int minutes, double width) {
@@ -195,7 +216,7 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
             if (widget.timerActive) ...[
               const SizedBox(height: 12),
               GlassButton.custom(
-                onTap: () => Navigator.of(context, rootNavigator: true).pop(0.0),
+                onTap: () => close(0.0),
                 label: '关闭当前定时', height: 42,
                 shape: const LiquidRoundedSuperellipse(borderRadius: 14),
                 style: GlassButtonStyle.transparent,
@@ -207,7 +228,7 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
             const SizedBox(height: 22),
             Row(children: [
               Expanded(child: actionButton(label: '取消',
-                onTap: () => Navigator.of(context, rootNavigator: true).pop())),
+                onTap: close)),
               const SizedBox(width: 10),
               Expanded(child: actionButton(label: '开始计时', onTap: submit, primary: true)),
             ]),
@@ -253,6 +274,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
   }
   double? lastPreview;
   String dragPath = '';
+  Object? dragPlaybackGeneration;
   int dragGeneration = 0;
   bool endingDrag = false;
   bool get canSeek => m.duration > 0 && m.state['seekable'] == true;
@@ -261,6 +283,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
       dragGeneration++;
       endingDrag = false;
       dragPath = m.path;
+      dragPlaybackGeneration = m.state['generation'];
       lastPreview = null;
     }
     setState(() => dragging = value);
@@ -273,7 +296,8 @@ class _PlaybackPageState extends State<PlaybackPage> {
   }
   void flushPreview() {
     previewTimer = null;
-    if (!mounted || dragging == null || endingDrag || dragPath != m.path) return;
+    if (!mounted || dragging == null || endingDrag || dragPath != m.path ||
+        dragPlaybackGeneration != m.state['generation']) return;
     if (lastPreview != dragging) {
       m.previewSeek(dragging!);
       lastPreview = dragging;
@@ -285,13 +309,28 @@ class _PlaybackPageState extends State<PlaybackPage> {
     endingDrag = true;
     final generation = dragGeneration;
     final path = m.path;
-    await m.seek(value);
-    if (mounted && generation == dragGeneration && path == m.path) {
-      setState(() { dragging = null; endingDrag = false; });
+    final playbackGeneration = dragPlaybackGeneration;
+    final success = await m.seek(value);
+    if (mounted && generation == dragGeneration && path == m.path &&
+        playbackGeneration == m.state['generation']) {
+      setState(() {
+        dragging = null;
+        endingDrag = false;
+        if (!success) seekFeedback = '定位失败，请重试';
+      });
+      if (!success) {
+        feedbackTimer?.cancel();
+        feedbackGeneration = playbackGeneration;
+        feedbackTimer = Timer(const Duration(milliseconds: 1600), () {
+          if (mounted && feedbackGeneration == m.state['generation']) {
+            setState(() => seekFeedback = null);
+          }
+        });
+      }
     }
   }
   final videoKey = GlobalKey();
-  bool landscape = false, locked = false, controlsVisible = true;
+  bool locked = false, controlsVisible = true, rotating = false;
   bool pipCommandPending = false;
   static const modes = {'sequence': '顺序播放', 'folder': '文件夹循环', 'one': '单集循环', 'shuffle': '随机播放'};
   @override
@@ -308,7 +347,9 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (seekFeedback != null && feedbackGeneration != m.state['generation']) {
       feedbackTimer?.cancel(); seekFeedback = null;
     }
-    if (dragging != null && (dragPath != m.path || (m.state['error'] as String? ?? '').isNotEmpty)) {
+    if (dragging != null && (dragPath != m.path ||
+        dragPlaybackGeneration != m.state['generation'] ||
+        (m.state['error'] as String? ?? '').isNotEmpty)) {
       previewTimer?.cancel(); previewTimer = null;
       dragGeneration++; dragging = null; endingDrag = false;
     }
@@ -323,7 +364,8 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (dragging != null && !endingDrag) m.cancelScrub();
     m.removeListener(changed);
     m.command('restoreBrightness');
-    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp, DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
+    unawaited(SystemChrome.setPreferredOrientations(playbackExitOrientations)
+      .catchError((Object _) {}));
     super.dispose();
   }
 
@@ -413,9 +455,19 @@ class _PlaybackPageState extends State<PlaybackPage> {
     )));
   }
   Future<void> rotate() async {
-    landscape = !landscape;
-    await SystemChrome.setPreferredOrientations(landscape ? [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight] : [DeviceOrientation.portraitUp]);
-    if (mounted) setState(() {});
+    if (rotating) return;
+    final current = MediaQuery.orientationOf(context);
+    setState(() => rotating = true);
+    try {
+      await SystemChrome.setPreferredOrientations(playbackOrientationTargets(current));
+    } catch (_) {
+      // MediaQuery remains authoritative. Restore the unrestricted policy if
+      // iOS rejects this particular transition.
+      try { await SystemChrome.setPreferredOrientations(playbackExitOrientations); } catch (_) {}
+      if (mounted) showLeiToast(context, '无法切换屏幕方向');
+    } finally {
+      if (mounted) setState(() => rotating = false);
+    }
   }
   Future<void> requestPiP() async {
     if (pipCommandPending || m.state['pipRequesting'] == true) return;
@@ -921,7 +973,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
               '画中画', pipCommandPending || m.state['pipRequesting'] == true ? null : requestPiP),
             const SizedBox(width: 12, height: 12),
           ],
-          playbackButton(const Icon(Icons.screen_rotation), '横竖屏', rotate),
+          playbackButton(const Icon(Icons.screen_rotation), '横竖屏', rotating ? null : rotate),
           const SizedBox(width: 12, height: 12),
           playbackButton(const Icon(Icons.fullscreen), '隐藏控件',
             () => setState(() => controlsVisible = false)),

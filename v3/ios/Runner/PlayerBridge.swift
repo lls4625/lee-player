@@ -3,15 +3,27 @@ import UIKit
 import UniformTypeIdentifiers
 import AVKit
 
-final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocumentPickerDelegate, AVPictureInPictureControllerDelegate {
+final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate, AVPictureInPictureControllerDelegate {
+  static func matchesPiPRestoreToken(expected: UUID?, received: String?) -> Bool {
+    guard let expected = expected, let received = received else { return false }
+    return received == expected.uuidString
+  }
   private let library: CourseLibrary
   private let playback: PlaybackService
   private let work = DispatchQueue(label: "雷player.library", qos: .userInitiated)
+  private var scanWork = DispatchQueue(label: "雷player.scan", qos: .userInitiated)
   private var importWork = DispatchQueue(label: "雷player.import", qos: .userInitiated)
   private var sink: FlutterEventSink?
   private var importResult: FlutterResult?
+  private weak var activePicker: UIDocumentPickerViewController?
   private var importParent = ""
   private var busy = false
+  private var workToken: UUID?
+  private var workWatchdog: DispatchWorkItem?
+  private var workDidReply = false
+  private var claimedMutationIDs: [String] = []
+  private var scanToken: UUID?
+  private var scanWatchdog: DispatchWorkItem?
   private var importBusy = false
   private var importToken: UUID?
   private var importCancellation: ImportCancellation?
@@ -29,6 +41,8 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     self.registrar = registrar; self.library = library; playback = PlaybackService(library: library)
     mediaKitChannel = FlutterMethodChannel(name: "lei.player/media_kit", binaryMessenger: registrar.messenger())
     super.init()
+    claimedMutationIDs = UserDefaults.standard.stringArray(
+      forKey: "library.claimedMutationOperationIDs") ?? []
     playback.pipDelegate = self
     playback.mediaKitTransport = { [weak self] method, arguments, completion in
       guard let self = self else { completion(false); return }
@@ -83,6 +97,21 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         }
         return
       }
+      if call.method == "pipAbort" {
+        guard let requestID = arguments["requestId"] as? String,
+          let engineID = arguments["engineId"] as? String else {
+          result(false); return
+        }
+        self.playback.abortMediaKitPiP(engineID: engineID, requestID: requestID) {
+          [weak self] aborted in
+          if aborted, self?.pendingMediaKitPiPToken?.uuidString == requestID {
+            self?.pendingMediaKitPiPToken = nil
+            self?.pendingMediaKitPiPSourceView = nil
+          }
+          result(aborted)
+        }
+        return
+      }
       guard call.method == "state" else { result(FlutterMethodNotImplemented); return }
       self.playback.receiveMediaKitState(arguments)
       result(true)
@@ -128,16 +157,139 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   }
 
   private func perform(_ result: @escaping FlutterResult, allowDuringImport: Bool = false,
+                       operationID requestedID: String? = nil, mutation: Bool = false,
+                       timeout: TimeInterval = 45,
                        operation: @escaping () throws -> Any?, completion: ((Any?) -> Void)? = nil) {
     guard !busy, allowDuringImport || !importBusy else {
       result(failure(LibraryFailure.app("file_operation_busy"))); return
     }
+    let operationID: String
+    if let requestedID = requestedID {
+      guard !requestedID.isEmpty, requestedID.utf8.count <= 128 else {
+        result(failure(LibraryFailure.app("invalid_operation_id"))); return
+      }
+      operationID = requestedID
+    } else {
+      operationID = UUID().uuidString
+    }
+    if mutation, claimedMutationIDs.contains(operationID) {
+      result(failure(LibraryFailure.app("operation_already_submitted", args: ["operationId": operationID])))
+      return
+    }
+    if mutation {
+      claimedMutationIDs.append(operationID)
+      if claimedMutationIDs.count > 1024 { claimedMutationIDs.removeFirst(claimedMutationIDs.count - 1024) }
+      UserDefaults.standard.set(claimedMutationIDs,
+        forKey: "library.claimedMutationOperationIDs")
+    }
+    let token = UUID()
     busy = true
+    workToken = token
+    workDidReply = false
+    let watchdog = DispatchWorkItem { [weak self] in
+      guard let self = self, self.workToken == token, !self.workDidReply else { return }
+      // Keep `busy` asserted and keep the original serial queue. The operation
+      // may still finish, so releasing the lane here could overlap a late write.
+      self.workDidReply = true
+      self.sink?(["type": "operation", "operationId": operationID,
+        "state": "timedOut", "mutation": mutation])
+      result(self.failure(LibraryFailure.app("operation_timeout", args: [
+        "operationId": operationID, "outcomeUnknown": mutation,
+      ])))
+    }
+    workWatchdog = watchdog
+    DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: watchdog)
     work.async {
       do {
         let value = try operation()
-        DispatchQueue.main.async { self.busy = false; completion?(value); result(value) }
-      } catch { DispatchQueue.main.async { self.busy = false; result(self.failure(error)) } }
+        DispatchQueue.main.async {
+          guard self.workToken == token else { return }
+          self.workWatchdog?.cancel(); self.workWatchdog = nil
+          self.workToken = nil; self.busy = false
+          completion?(value)
+          if self.workDidReply {
+            self.sink?(["type": "operation", "operationId": operationID,
+              "state": "completed", "success": true])
+          } else {
+            self.workDidReply = true
+            result(value)
+          }
+        }
+      } catch {
+        DispatchQueue.main.async {
+          guard self.workToken == token else { return }
+          self.workWatchdog?.cancel(); self.workWatchdog = nil
+          self.workToken = nil; self.busy = false
+          if self.workDidReply {
+            self.sink?(["type": "operation", "operationId": operationID,
+              "state": "completed", "success": false,
+              "code": (error as? LibraryFailure)?.code ?? "operation_failed"])
+          } else {
+            self.workDidReply = true
+            result(self.failure(error))
+          }
+        }
+      }
+    }
+  }
+
+  private func performIsolatedRead(_ result: @escaping FlutterResult,
+                                   operationID requestedID: String?,
+                                   operation: @escaping () throws -> (Any?, [[String: Any]], [String])) {
+    guard scanToken == nil else {
+      result(failure(LibraryFailure.app("file_operation_busy"))); return
+    }
+    let operationID: String
+    if let requestedID = requestedID {
+      guard !requestedID.isEmpty, requestedID.utf8.count <= 128 else {
+        result(failure(LibraryFailure.app("invalid_operation_id"))); return
+      }
+      operationID = requestedID
+    } else {
+      operationID = UUID().uuidString
+    }
+    let token = UUID()
+    scanToken = token
+    let watchdog = DispatchWorkItem { [weak self] in
+      guard let self = self, self.scanToken == token else { return }
+      self.scanToken = nil
+      self.scanWatchdog = nil
+      // scanSnapshot is read-only. Quarantine its lane so a provider that never
+      // returns cannot lock library mutations or a later scan. Its late result
+      // is discarded by token and cannot overwrite warnings/state.
+      self.scanWork = DispatchQueue(label: "雷player.scan.\(UUID().uuidString)", qos: .userInitiated)
+      self.sink?(["type": "operation", "operationId": operationID,
+        "state": "timedOut", "mutation": false])
+      result(self.failure(LibraryFailure.app("operation_timeout", args: [
+        "operationId": operationID, "outcomeUnknown": false,
+      ])))
+    }
+    scanWatchdog = watchdog
+    DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: watchdog)
+    let queue = scanWork
+    queue.async {
+      do {
+        let (value, warnings, protectionPaths) = try operation()
+        DispatchQueue.main.async {
+          guard self.scanToken == token else { return }
+          self.scanWatchdog?.cancel(); self.scanWatchdog = nil
+          self.scanToken = nil
+          if !warnings.isEmpty {
+            self.sink?(["type": "scanWarning", "warnings": warnings])
+          }
+          if !protectionPaths.isEmpty {
+            self.library.scheduleProtectionNormalization(paths: protectionPaths)
+          }
+          result(value)
+        }
+      } catch {
+        DispatchQueue.main.async {
+          guard self.scanToken == token else { return }
+          self.scanWatchdog?.cancel(); self.scanWatchdog = nil
+          self.scanToken = nil
+          result(self.failure(error))
+        }
+      }
     }
   }
 
@@ -251,7 +403,10 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         defaults.set(ascending, forKey: "library.sortAscending")
         result(["layout": layout, "sort": sort, "ascending": ascending]); return
       case "scan":
-        perform(result, allowDuringImport: true, operation: { try self.library.scan() }); return
+        performIsolatedRead(result, operationID: args["operationId"] as? String) {
+          let snapshot = try self.library.scanSnapshot()
+          return (snapshot.items, snapshot.warnings, snapshot.protectionPaths)
+        }; return
       case "records": result(library.records); return
       case "state": result(playback.snapshot()); return
       case "playbackInfo": result(playback.playbackInfo()); return
@@ -265,17 +420,32 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         let appearance = UserDefaults.standard.string(forKey: "appearance.mode") ?? "system"
         picker.overrideUserInterfaceStyle = appearance == "dark" ? .dark : appearance == "light" ? .light : .unspecified
         picker.delegate = self
+        picker.presentationController?.delegate = self
         importResult = result
-        controller.present(picker, animated: true); return
+        activePicker = picker
+        controller.present(picker, animated: true) {
+          // Some iOS versions replace the presentation controller during
+          // presentation; install the observer again without timing out a user
+          // who legitimately keeps the picker open for a long time.
+          picker.presentationController?.delegate = self
+          guard picker.presentingViewController != nil else {
+            self.activePicker = nil
+            let callback = self.importResult; self.importResult = nil
+            callback?(self.failure(LibraryFailure.app("file_picker_unavailable")))
+            return
+          }
+        }; return
       case "cancelImport":
         if let cancellation = importCancellation { library.cancelImport(cancellation) }
       case "createFolder":
         let parent = args["parent"] as? String ?? "", name = args["name"] as? String ?? ""
-        perform(result, operation: { try self.library.createFolder(parent: parent, name: name); return nil }); return
+        perform(result, operationID: args["operationId"] as? String, mutation: true,
+          operation: { try self.library.createFolder(parent: parent, name: name); return nil }); return
       case "move":
         guard !busy && importResult == nil else { throw LibraryFailure.app("file_operation_busy") }
         let path = args["path"] as? String ?? "", parent = args["parent"] as? String ?? "", name = args["name"] as? String ?? ""
-        perform(result, operation: { try self.library.move(path: path, parent: parent, name: name) }, completion: { value in
+        perform(result, operationID: args["operationId"] as? String, mutation: true,
+          operation: { try self.library.move(path: path, parent: parent, name: name) }, completion: { value in
           if let new = value as? String {
             self.library.remapRecords(from: path, to: new)
             self.playback.remapQueuePath(from: path, to: new)
@@ -284,14 +454,20 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       case "trash":
         guard !busy && importResult == nil else { throw LibraryFailure.app("file_operation_busy") }
         let path = args["path"] as? String ?? ""
-        perform(result, operation: { try self.library.trash(path: path) }, completion: { _ in
+        perform(result, operationID: args["operationId"] as? String, mutation: true,
+          operation: { try self.library.trash(path: path) }, completion: { _ in
           self.playback.stopForMutation(path)
         }); return
-      case "trashList": perform(result, allowDuringImport: true, operation: { try self.library.trashList() }); return
+      case "trashList":
+        performIsolatedRead(result, operationID: args["operationId"] as? String) {
+          (try self.library.trashList(), [], [])
+        }; return
       case "restore":
         let token = args["token"] as? String ?? ""
-        perform(result, operation: { try self.library.restore(token: token); return nil }); return
-      case "emptyTrash": perform(result, operation: { try self.library.emptyTrash(); return nil }); return
+        perform(result, operationID: args["operationId"] as? String, mutation: true,
+          operation: { try self.library.restore(token: token); return nil }); return
+      case "emptyTrash": perform(result, operationID: args["operationId"] as? String,
+        mutation: true, operation: { try self.library.emptyTrash(); return nil }); return
       case "favorite":
         let path = args["path"] as? String ?? ""
         _ = try library.url(path)
@@ -327,6 +503,14 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       case "subtitle": try playback.loadSubtitle(path: args["path"] as? String ?? "")
       case "restoreBrightness": playback.restoreBrightness()
       case "pipRestored":
+        if pipRestoreToken == nil, args["restoreToken"] == nil {
+          // A normal, non-PiP openPlayer event has nothing to acknowledge.
+          result(nil); return
+        }
+        guard Self.matchesPiPRestoreToken(expected: pipRestoreToken,
+          received: args["restoreToken"] as? String) else {
+          result(failure(LibraryFailure.app("pip_restore_stale"))); return
+        }
         pipRestoreCompletion?(true)
         pipRestoreCompletion = nil
         pipRestoreToken = nil
@@ -361,11 +545,23 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   }
 
   func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    guard controller === activePicker else { return }
+    activePicker = nil
     let callback = importResult; importResult = nil; callback?(0)
   }
 
+  func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+    guard let picker = presentationController.presentedViewController as? UIDocumentPickerViewController,
+      picker === activePicker,
+      let callback = importResult else { return }
+    activePicker = nil
+    importResult = nil
+    callback(0)
+  }
+
   func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-    guard let callback = importResult else { return }
+    guard controller === activePicker, let callback = importResult else { return }
+    activePicker = nil
     importResult = nil
     guard !urls.isEmpty else { callback(0); return }
     let parent = importParent
@@ -409,7 +605,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     let token = UUID()
     pipRestoreToken = token
     pipRestoreCompletion = completionHandler
-    sink?(["type": "openPlayer"])
+    sink?(["type": "openPlayer", "restoreToken": token.uuidString])
     DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
       guard self?.pipRestoreToken == token else { return }
       self?.pipRestoreCompletion?(false)

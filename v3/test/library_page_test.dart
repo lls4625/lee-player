@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -125,6 +127,63 @@ void main() {
       tester.getCenter(find.text('当前文件夹为空')).dx,
       closeTo(tester.getCenter(content).dx, 0.01),
     );
+  });
+
+  testWidgets('initial loading is not presented as an empty library', (
+    tester,
+  ) async {
+    const methods = MethodChannel('lei.player/methods');
+    const events = MethodChannel('lei.player/events');
+    const tips = MethodChannel('lei.player/developer_tip');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final state = Completer<Object?>();
+
+    messenger.setMockMethodCallHandler(methods, (call) async {
+      if (call.method == 'state') return state.future;
+      return switch (call.method) {
+        'appearance' => 'dark',
+        'language' => 'system',
+        'libraryPreferences' => <String, Object>{
+          'layout': 'list',
+          'sort': 'name',
+          'ascending': true,
+        },
+        'scan' => <Object>[],
+        'records' => <String, Object>{},
+        _ => null,
+      };
+    });
+    messenger.setMockMethodCallHandler(events, (_) async => null);
+    messenger.setMockMethodCallHandler(
+      tips,
+      (_) async => <String, Object>{
+        'revision': 1,
+        'canPay': false,
+        'products': <Object>[],
+      },
+    );
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(methods, null);
+      messenger.setMockMethodCallHandler(events, null);
+      messenger.setMockMethodCallHandler(tips, null);
+    });
+
+    final model = PlayerModel();
+    addTearDown(model.dispose);
+    await tester.pumpWidget(MaterialApp(home: LibraryPage(model: model)));
+    await tester.pump();
+
+    expect(
+      find.byKey(const Key('library-initializing-content')),
+      findsOneWidget,
+    );
+    expect(find.text('正在读取课程…'), findsOneWidget);
+    expect(find.text('当前文件夹为空'), findsNothing);
+
+    state.complete(<String, Object>{});
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('library-empty-content')), findsOneWidget);
   });
 
   testWidgets('settings builds lazily and only a left-edge swipe exits', (

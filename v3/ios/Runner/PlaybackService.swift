@@ -4,6 +4,14 @@ import MediaPlayer
 import UIKit
 import CryptoKit
 
+struct AudioRecoveryRetryPolicy {
+  static let delays: [TimeInterval] = [0.25, 0.75, 1.5]
+  static func delay(forAttempt attempt: Int) -> TimeInterval? {
+    guard delays.indices.contains(attempt) else { return nil }
+    return delays[attempt]
+  }
+}
+
 final class LeeMediaKitEngine {
   let id = UUID().uuidString
   var changed: (() -> Void)?
@@ -136,6 +144,11 @@ struct SubtitleCue {
 }
 
 final class PlaybackService: NSObject {
+  static func matchesPiPAbort(engineID: String, requestID: String,
+                              currentEngineID: String?, currentRequestID: String?) -> Bool {
+    !engineID.isEmpty && !requestID.isEmpty
+      && engineID == currentEngineID && requestID == currentRequestID
+  }
   let player = AVPlayer()
   var mediaKitTransport: ((String, [String: Any], @escaping (Bool) -> Void) -> Void)?
   private var mediaKit: LeeMediaKitEngine?
@@ -159,6 +172,7 @@ final class PlaybackService: NSObject {
   private var audioRecoveryWorkItem: DispatchWorkItem?
   private var audioRecoveryPending = false
   private var audioRecoveryAttempt = 0
+  private var audioRecoveryExhausted = false
   private var lastDiagnostic = ""
   private var mediaIsAudio: Bool { guard let path = currentPath else { return false }; return library.audioExtensions.contains(URL(fileURLWithPath: path).pathExtension.lowercased()) }
   private var enginePlaying: Bool { mediaKit?.playing ?? (player.timeControlStatus == .playing) }
@@ -197,10 +211,13 @@ final class PlaybackService: NSObject {
   private var mediaKitPiP: MediaKitPiPRenderer?
   private var mediaKitPiPPreparing = false
   private var mediaKitPiPRequestID: String?
+  private var mediaKitPiPActiveRequestID: String?
   private var mediaKitPiPPreparationTimeout: DispatchWorkItem?
   private var mediaKitPiPRestoring = false
   private var mediaKitPiPRestoreTimeout: DispatchWorkItem?
   private var retiringPiP: [ObjectIdentifier: (AVPictureInPictureController, MediaKitPiPRenderer?)] = [:]
+  private var retiringPiPAbortCompletions:
+    [ObjectIdentifier: (token: UUID, completion: (Bool) -> Void)] = [:]
 
   private func discardAVPlayerPiP() {
     // Capture this before cancellation clears pipStartIssued. A start request
@@ -287,6 +304,7 @@ final class PlaybackService: NSObject {
       guard let self = self, self.retiringPiP[key] != nil else { return }
       controller.delegate = nil
       self.retiringPiP.removeValue(forKey: key)
+      self.retiringPiPAbortCompletions.removeValue(forKey: key)?.completion(false)
       self.publish()
     }
     publish()
@@ -297,6 +315,7 @@ final class PlaybackService: NSObject {
     guard retiringPiP[key] != nil else { return false }
     controller.delegate = nil
     retiringPiP.removeValue(forKey: key)
+    retiringPiPAbortCompletions.removeValue(forKey: key)?.completion(true)
     publish()
     return true
   }
@@ -450,6 +469,7 @@ final class PlaybackService: NSObject {
       "rewindSeconds": rewindSeconds, "forwardSeconds": forwardSeconds,
       "smartIntro": smartIntro, "detectingIntro": detectingIntro, "introSkipped": introSkipped,
       "error": errorMessage, "interrupted": interrupted, "volume": Double(mediaVolume),
+      "audioRecovery": audioRecoveryExhausted ? "exhausted" : audioRecoveryPending ? "pending" : "idle",
       "brightness": Double(mediaBrightness), "fit": fit,
       "a": aPoint ?? -1, "b": bPoint ?? -1,
       "sleepRemaining": max(0, sleepUntil?.timeIntervalSinceNow ?? 0),
@@ -549,7 +569,11 @@ final class PlaybackService: NSObject {
     publish()
     transport("release", [:]) { [weak self] success in
       guard let self = self, self.generation == token else { return }
-      if !success { self.lastDiagnostic = "media_kit_release_timeout" }
+      guard success else {
+        self.lastDiagnostic = "media_kit_release_failed"
+        self.fail("media_engine_cleanup_failed")
+        return
+      }
       self.loadPrepared(path: path, resume: resume, token: token)
     }
   }
@@ -558,6 +582,9 @@ final class PlaybackService: NSObject {
     do {
       let url = try library.url(path)
       guard FileManager.default.fileExists(atPath: url.path) else { throw LibraryFailure.app("media_missing") }
+      // Best effort only; never block the main playback path on a provider's
+      // metadata operation.
+      library.scheduleProtectionNormalization(paths: [path])
       timelineReady = false
       timelineOrigin = 0
       fallbackAudio = []; fallbackSubtitles = []
@@ -741,6 +768,7 @@ final class PlaybackService: NSObject {
       audioRecoveryWorkItem?.cancel()
       audioRecoveryWorkItem = nil
       audioRecoveryAttempt = 0
+      audioRecoveryExhausted = false
     }
     let token = generation
     let path = currentPath
@@ -782,9 +810,16 @@ final class PlaybackService: NSObject {
     audioRecoveryWorkItem = nil
     guard audioRecoveryPending, wantsPlayback, !interrupted,
           UIApplication.shared.applicationState == .active else { return }
-    let delays = [0.25, 0.75, 1.5]
-    guard audioRecoveryAttempt < delays.count else { return }
-    let delay = delays[audioRecoveryAttempt]
+    guard let delay = AudioRecoveryRetryPolicy.delay(forAttempt: audioRecoveryAttempt) else {
+      // Do not leave recovery in a silent, permanently-pending state. Keep the
+      // user's play intent so an explicit Play can start a fresh attempt, while
+      // exposing a terminal state to Flutter. Pause still clears that intent.
+      audioRecoveryPending = false
+      audioRecoveryExhausted = true
+      errorMessage = "audio_recovery_failed"
+      publish()
+      return
+    }
     audioRecoveryAttempt += 1
     let token = generation
     let path = currentPath
@@ -802,13 +837,16 @@ final class PlaybackService: NSObject {
     audioRecoveryWorkItem?.cancel()
     audioRecoveryWorkItem = nil
     audioRecoveryAttempt = 0
+    audioRecoveryExhausted = false
     if clearPending { audioRecoveryPending = false }
   }
 
   func pause() {
+    let clearRecoveryFailure = audioRecoveryExhausted && errorMessage == "audio_recovery_failed"
     cancelAudioRecovery()
     cancelIntroDetection()
     wantsPlayback = false; resumeAfterInterruption = false
+    if clearRecoveryFailure { errorMessage = "" }
     scrubbing = false
     pauseEngine(); persist(); publish()
   }
@@ -1294,6 +1332,7 @@ final class PlaybackService: NSObject {
   func loadSubtitle(path: String) throws {
     guard trackSelection == nil else { throw LibraryFailure.app("subtitle_switch_busy") }
     let url = try library.url(path)
+    library.scheduleProtectionNormalization(paths: [path])
     let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
     guard size <= 10 * 1024 * 1024 else { throw LibraryFailure.app("subtitle_too_large") }
     if let mediaKit = mediaKit {
@@ -1610,6 +1649,7 @@ final class PlaybackService: NSObject {
       renderer.pauseRequested = { [weak self] in self?.pause() }
       renderer.startTimedOut = { [weak self, weak renderer] in
         guard let self = self, let renderer = renderer, self.mediaKitPiP === renderer else { return }
+        self.mediaKitPiPActiveRequestID = nil
         self.retirePiP(renderer.controller, renderer: renderer)
         self.mediaKitPiP = nil
         self.restoreMediaKitVideoOutput()
@@ -1620,6 +1660,7 @@ final class PlaybackService: NSObject {
       renderer.playingProvider = { [weak self] in self?.enginePlaying ?? false }
       renderer.rateProvider = { [weak self] in Double(self?.rate ?? 1) }
       mediaKitPiP = renderer
+      mediaKitPiPActiveRequestID = requestID
       renderer.start()
       publish()
       completion(true)
@@ -1646,7 +1687,51 @@ final class PlaybackService: NSObject {
     guard let renderer = mediaKitPiP, renderer.controller === controller else { return }
     renderer.stop()
     mediaKitPiP = nil
+    mediaKitPiPActiveRequestID = nil
     restoreMediaKitVideoOutput()
+  }
+
+  /// Abort only the renderer created for this exact engine/request pair. This
+  /// is used when Flutter handed rendering to native PiP successfully but then
+  /// failed to rebuild its inline video track.
+  func abortMediaKitPiP(engineID: String, requestID: String,
+                        completion: @escaping (Bool) -> Void) {
+    guard mediaKit?.id == engineID else { completion(false); return }
+    if mediaKitPiPPreparing,
+       Self.matchesPiPAbort(engineID: engineID, requestID: requestID,
+         currentEngineID: mediaKit?.id, currentRequestID: mediaKitPiPRequestID),
+       mediaKitPiP == nil {
+      mediaKitPiPPreparationTimeout?.cancel()
+      mediaKitPiPPreparationTimeout = nil
+      mediaKitPiPPreparing = false
+      mediaKitPiPRequestID = nil
+      publish()
+      completion(true)
+      return
+    }
+    guard let renderer = mediaKitPiP,
+          Self.matchesPiPAbort(engineID: engineID, requestID: requestID,
+            currentEngineID: mediaKit?.id, currentRequestID: mediaKitPiPActiveRequestID),
+          !mediaKitPiPRestoring else { completion(false); return }
+    let controller = renderer.controller
+    let key = ObjectIdentifier(controller)
+    let waitForDidStop = renderer.isActive
+    if waitForDidStop {
+      let abortToken = UUID()
+      retiringPiPAbortCompletions[key] = (abortToken, completion)
+      // Return false before Flutter's own 2 s deadline if UIKit never confirms
+      // that the visible PiP window stopped. Flutter will then full-release.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        guard let self = self,
+          self.retiringPiPAbortCompletions[key]?.token == abortToken else { return }
+        self.retiringPiPAbortCompletions.removeValue(forKey: key)?.completion(false)
+      }
+    }
+    mediaKitPiPActiveRequestID = nil
+    retirePiP(controller, renderer: renderer)
+    mediaKitPiP = nil
+    publish()
+    if !waitForDidStop { completion(true) }
   }
 
   func ownsMediaKitPiP(_ controller: AVPictureInPictureController) -> Bool {
@@ -1701,6 +1786,7 @@ final class PlaybackService: NSObject {
     mediaKitPiPRestoreTimeout = nil
     mediaKitPiPPreparing = false
     mediaKitPiPRequestID = nil
+    mediaKitPiPActiveRequestID = nil
     if let renderer = mediaKitPiP { retirePiP(renderer.controller, renderer: renderer) }
     mediaKitPiP = nil
     mediaKitPiPRestoring = false

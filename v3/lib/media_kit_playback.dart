@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'media_kit_recovery.dart';
 
 class MediaKitPlayback extends ChangeNotifier {
   MediaKitPlayback() { _channel.setMethodCallHandler(_handle); }
@@ -15,12 +16,21 @@ class MediaKitPlayback extends ChangeNotifier {
   String? _requestedId;
   Future<void> _commands = Future<void>.value();
   int _commandEpoch = 0;
+  final Set<MediaKitCommandPermit> _activePermits = {};
+  int _refreshEpoch = 0;
+  final MediaKitLatestIntent<bool> _playIntent = MediaKitLatestIntent<bool>();
+  final MediaKitLatestIntent<double> _seekIntent = MediaKitLatestIntent<double>();
+  final MediaKitCleanupCoordinator _cleanup = MediaKitCleanupCoordinator();
+  final Map<Player, bool> _playRepairs = {};
+  final Map<Player, bool> _seekRepairs = {};
+  int _repairGeneration = 0;
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   final List<String> _errors = [];
   final Set<String> _timedOutProperties = {};
   final Stopwatch _clock = Stopwatch();
   Timer? _timer;
   bool _ready = false, _refreshing = false, _disposed = false, _releasing = false;
+  int _releaseOperations = 0;
   String? _pipPreviousSwFast;
   String? _pipVideoTrack;
   String _failure = '';
@@ -31,13 +41,16 @@ class MediaKitPlayback extends ChangeNotifier {
     final videoController = controller;
     if (videoController == null) throw StateError('Flutter video controller was released');
     final handle = await player.handle;
+    if (_requestedId != id || _player != player || _disposed) {
+      throw StateError('Playback session changed');
+    }
     final previousTextureId = videoController.id.value;
     await _videoChannel.invokeMethod<void>('VideoOutputManager.Create', {
       'handle': '$handle',
       'configuration': const {
         'width': 'null', 'height': 'null', 'enableHardwareAcceleration': true,
       },
-    });
+    }).timeout(const Duration(seconds: 4));
     if (!await _waitForVideoTexture(videoController, id, previousTextureId)) {
       throw StateError('Flutter video output could not be recreated');
     }
@@ -57,7 +70,7 @@ class MediaKitPlayback extends ChangeNotifier {
 
   Future<void> _restoreVideoTrack(NativePlayer native) async {
     final track = _pipVideoTrack ?? 'auto';
-    await native.setProperty('vid', track);
+    await native.setProperty('vid', track).timeout(const Duration(seconds: 2));
     _log('video track restored vid=$track');
   }
 
@@ -70,23 +83,51 @@ class MediaKitPlayback extends ChangeNotifier {
       call.method == 'stop' && _requestedId == null;
     if (barrier) {
       _commandEpoch++;
+      _repairGeneration++;
+      _playRepairs.clear();
+      _seekRepairs.clear();
+      for (final active in _activePermits) { active.invalidate(); }
       // A new playback session must not wait behind a plugin Future which may
       // never complete. Late work is isolated by engineId and _requestedId.
       _commands = Future<void>.value();
     }
     final epoch = _commandEpoch;
+    final permit = MediaKitCommandPermit();
+    _activePermits.add(permit);
+    if ((call.method == 'play' || call.method == 'pause') &&
+        id != null && id == _requestedId) {
+      args['_playIntent'] = _playIntent.record(call.method == 'play');
+      final player = _player;
+      if (player != null && _playRepairs.containsKey(player)) {
+        _playRepairs[player] = true;
+      }
+    } else if (call.method == 'seek' && id != null && id == _requestedId) {
+      final target = (args['seconds'] as num?)?.toDouble();
+      if (target != null) {
+        args['_seekIntent'] = _seekIntent.record(target);
+        final player = _player;
+        if (player != null && _seekRepairs.containsKey(player)) {
+          _seekRepairs[player] = true;
+        }
+      }
+    }
     final result = Completer<bool>();
     _commands = _commands.then((_) async {
       try {
-        final value = await _execute(call.method, args).timeout(_commandTimeout(call.method));
+        final value = await _execute(call.method, args, permit).timeout(_commandTimeout(call.method));
         if (!result.isCompleted) result.complete(value);
       } catch (error) {
+        // Future.timeout cannot cancel its source.  Invalidate it so that any
+        // late continuation cannot publish state or install a heartbeat.
+        permit.invalidate();
         _log('${call.method}: $error');
         if (call.method == 'open' && _requestedId == id && epoch == _commandEpoch) {
           _failure = 'media_kit_open_failed';
           await _publishFailure();
         }
         if (!result.isCompleted) result.complete(false);
+      } finally {
+        _activePermits.remove(permit);
       }
     });
     return result.future;
@@ -101,14 +142,16 @@ class MediaKitPlayback extends ChangeNotifier {
     _ => const Duration(seconds: 6),
   };
 
-  Future<bool> _execute(String method, Map<String, dynamic> args) async {
-    if (_disposed) return false;
-    if (method == 'release') { await _release(); return true; }
+  Future<bool> _execute(String method, Map<String, dynamic> args,
+      MediaKitCommandPermit permit) async {
+    if (_disposed || !permit.isValid) return false;
+    if (method == 'release') return _release();
     final id = args['engineId'] as String? ?? '';
     if (method == 'open') {
       if (_requestedId != id || id.isEmpty) return false;
-      await _release();
-      if (_requestedId != id) return false;
+      final released = await _release();
+      if (!released) return false;
+      if (!_allows(permit, id)) return false;
       MediaKit.ensureInitialized();
       engineId = id;
       _clock.reset(); _clock.start();
@@ -120,31 +163,60 @@ class MediaKitPlayback extends ChangeNotifier {
           configuration: const VideoControllerConfiguration(enableHardwareAcceleration: true));
       }
       notifyListeners();
-      _subscriptions.add(player.stream.error.listen((message) { _log(message); }));
+      _subscriptions.add(player.stream.error.listen((message) {
+        unawaited(_handleRuntimeError(player, id, message));
+      }));
       _subscriptions.add(player.stream.log.listen((entry) { _log('${entry.prefix}: ${entry.text}'); }));
       final native = player.platform as NativePlayer;
       await native.setProperty('audio-spdif', '');
-      if (_requestedId != id) return false;
+      if (!_allows(permit, id, player)) {
+        await _abandonOpen(player);
+        return false;
+      }
       await player.open(Media(args['url'] as String), play: false);
-      if (_requestedId != id) return false;
+      if (!_allows(permit, id, player)) {
+        await _abandonOpen(player);
+        return false;
+      }
       await player.setVolume(((args['volume'] as num?)?.toDouble() ?? 1) * 100);
+      if (!_allows(permit, id, player)) {
+        await _abandonOpen(player);
+        return false;
+      }
       await player.setRate((args['rate'] as num?)?.toDouble() ?? 1);
+      if (!_allows(permit, id, player)) {
+        await _abandonOpen(player);
+        return false;
+      }
       _ready = true;
       await _refresh(player, id);
+      if (!_allows(permit, id, player)) {
+        await _abandonOpen(player);
+        return false;
+      }
       _timer = Timer.periodic(const Duration(milliseconds: 250), (_) { unawaited(_heartbeat(player, id)); });
       return true;
     }
     final player = _player;
     if (player == null || engineId != id || _releasing) return false;
-    if (method == 'stop') { await _release(); return true; }
+    if (method == 'stop') return _release();
     if (_requestedId != id) return false;
     final native = player.platform as NativePlayer;
     switch (method) {
-      case 'play': await player.play(); break;
-      case 'pause': await player.pause(); break;
+      case 'play':
+      case 'pause':
+        final intent = args['_playIntent'] as int;
+        if (method == 'play') { await player.play(); } else { await player.pause(); }
+        if (!_allows(permit, id, player) || !_playIntent.isLatest(intent)) {
+          _scheduleLatestPlayIntent(player, id);
+          return false;
+        }
+        break;
       case 'rate': await player.setRate((args['value'] as num).toDouble()); break;
       case 'volume': await player.setVolume((args['value'] as num).toDouble() * 100); break;
-      case 'seek': return _seek(player, id, (args['seconds'] as num).toDouble());
+      case 'seek':
+        return _seek(player, id, (args['seconds'] as num).toDouble(),
+            args['_seekIntent'] as int, permit);
       case 'track':
         final kind = args['kind'] as String;
         final trackId = args['trackId'] as String? ?? 'no';
@@ -161,55 +233,91 @@ class MediaKitPlayback extends ChangeNotifier {
       case 'subtitle': await player.setSubtitleTrack(SubtitleTrack.uri(args['url'] as String)); break;
       case 'pip':
         final handle = await player.handle;
+        if (!_allows(permit, id, player)) return false;
         final requestId = args['requestId'] as String? ?? '';
         if (requestId.isEmpty) return false;
         final wasPlaying = player.state.playing;
         final videoTrack = await _property(native, 'vid');
+        if (!_allows(permit, id, player)) return false;
+        final previousSwFast = await _property(native, 'sw-fast') ?? 'no';
+        if (!_allows(permit, id, player)) return false;
         _pipVideoTrack = videoTrack == null || videoTrack == 'no' ? 'auto' : videoTrack;
-        _pipPreviousSwFast = await _property(native, 'sw-fast') ?? 'no';
+        _pipPreviousSwFast = previousSwFast;
         var handoffBegan = false;
         var started = false;
         try {
           await player.pause();
+          if (!_allows(permit, id, player)) return false;
           await native.setProperty('sw-fast', 'yes');
+          if (!_allows(permit, id, player)) {
+            await _restorePiPRenderingMode(native, player, id);
+            return false;
+          }
           await native.setProperty('vid', 'no');
+          if (!_allows(permit, id, player)) {
+            await _restoreVideoTrack(native);
+            await _restorePiPRenderingMode(native, player, id);
+            return false;
+          }
           handoffBegan = true;
           await _videoChannel.invokeMethod<void>('VideoOutputManager.Dispose', {'handle': '$handle'});
+          if (!_allows(permit, id, player)) {
+            if (_sameSession(player, id)) {
+              await _restorePiPVideoOutput(player, native, id);
+            }
+            return false;
+          }
           started = await _channel.invokeMethod<bool>('pipReady', {
             'engineId': id, 'requestId': requestId, 'handle': handle,
           }) ?? false;
-          if (started && _requestedId == id) {
-            await _restoreVideoTrack(native);
+          if (!_allows(permit, id, player)) {
+            if (started) {
+              await _recoverStartedPiPFailure(player, native, id, requestId);
+            } else if (handoffBegan && _sameSession(player, id)) {
+              await _restorePiPVideoOutput(player, native, id);
+            }
+            return false;
           }
-          if (!started && handoffBegan && _requestedId == id && _player == player) {
+          if (started && _allows(permit, id, player)) {
+            await _restoreVideoTrack(native);
+            if (!_allows(permit, id, player)) {
+              await _recoverStartedPiPFailure(
+                  player, native, id, requestId);
+              return false;
+            }
+          }
+          if (!started && handoffBegan && _allows(permit, id, player)) {
             // The native request may have expired while this command was
             // queued. Roll back the output takeover without poisoning playback.
-            await _restorePiPVideoOutput(player, native);
+            await _restorePiPVideoOutput(player, native, id);
           }
-          return started;
+          return started && _allows(permit, id, player);
         } catch (error, stackTrace) {
-          if (handoffBegan && _requestedId == id) {
-            try { await _restorePiPVideoOutput(player, native); }
+          if (started) {
+            await _recoverStartedPiPFailure(player, native, id, requestId);
+          } else if (handoffBegan && _sameSession(player, id)) {
+            try { await _restorePiPVideoOutput(player, native, id); }
             catch (restoreError) {
               _log('pip output rollback failed: $restoreError');
               _failure = 'pip_restore_failed';
               await _publishFailure();
             }
-          } else if (!handoffBegan) {
+          } else if (!handoffBegan && _sameSession(player, id)) {
             try { await _restoreVideoTrack(native); }
             catch (restoreError) { _log('pip video rollback failed: $restoreError'); }
-            try { await _restorePiPRenderingMode(native); }
+            try { await _restorePiPRenderingMode(native, player, id); }
             catch (restoreError) { _log('pip mode rollback failed: $restoreError'); }
           }
           Error.throwWithStackTrace(error, stackTrace);
         } finally {
-          if (wasPlaying && _failure.isEmpty && _player == player && _requestedId == id) {
-            try { await player.play(); }
-            catch (error) { _log('pip resume failed: $error'); }
+          if (wasPlaying && _playIntent.value != false && _failure.isEmpty &&
+              _sameSession(player, id)) {
+            if (_playIntent.value == null) _playIntent.record(true);
+            _scheduleLatestPlayIntent(player, id);
           }
         }
       case 'pipRestore':
-        await _restorePiPVideoOutput(player, native);
+        await _restorePiPVideoOutput(player, native, id);
         break;
       case 'loop':
         final start = (args['from'] as num).toDouble(), end = (args['to'] as num).toDouble();
@@ -219,26 +327,87 @@ class MediaKitPlayback extends ChangeNotifier {
         break;
       default: return false;
     }
+    if (!_allows(permit, id, player)) return false;
     await _refresh(player, id);
-    return _requestedId == id;
+    return _allows(permit, id, player);
   }
 
-  Future<void> _restorePiPVideoOutput(Player player, NativePlayer native) async {
+  bool _allows(MediaKitCommandPermit permit, String id, [Player? player]) =>
+      permit.isValid && !_disposed && _requestedId == id &&
+      (player == null || _player == player);
+
+  bool _sameSession(Player player, String id) =>
+      !_disposed && _requestedId == id && _player == player;
+
+  Future<bool> _abortNativePiP(String id, String requestId) async {
     try {
-      await _restorePiPRenderingMode(native);
+      return await _channel.invokeMethod<bool>('pipAbort', {
+        'engineId': id,
+        'requestId': requestId,
+      }).timeout(const Duration(seconds: 2)) ?? false;
+    } catch (error) {
+      _log('native pip abort failed: $error');
+      return false;
+    }
+  }
+
+  Future<void> _recoverStartedPiPFailure(Player player, NativePlayer native,
+      String id, String requestId) async {
+    final aborted = await _abortNativePiP(id, requestId);
+    if (aborted && _sameSession(player, id)) {
+      try {
+        await _restorePiPVideoOutput(player, native, id);
+        return;
+      } catch (error) {
+        _log('inline output restore after pip abort failed: $error');
+      }
+    }
+    if (_sameSession(player, id)) {
+      _failure = 'pip_restore_failed';
+      await _publishFailure(id);
+      // An unverified native PiP owner and an inline output must never coexist.
+      // Full release is the conservative fallback when the keyed abort fails.
+      await _release();
+    }
+  }
+
+  Future<void> _abandonOpen(Player player) async {
+    if (_player == player) {
+      await _release();
+      return;
+    }
+    // A different current player is only possible after a release barrier,
+    // which already transferred ownership of this stale player to _cleanup.
+    final cleaned = await _cleanup.drain(const Duration(seconds: 3));
+    if (!cleaned) _log('stale open remains quarantined behind cleanup gate');
+  }
+
+  Future<void> _restorePiPVideoOutput(
+      Player player, NativePlayer native, String id) async {
+    if (_disposed || _requestedId != id || _player != player) return;
+    try {
+      await _restorePiPRenderingMode(native, player, id);
     } catch (error) { _log('pip mode restore failed: $error'); }
+    if (_disposed || _requestedId != id || _player != player) return;
     await _createVideoOutput(player);
-    if (_pipPreviousSwFast != null) {
-      try { await _restorePiPRenderingMode(native); }
+    if (_pipPreviousSwFast != null && !_disposed && _requestedId == id && _player == player) {
+      try { await _restorePiPRenderingMode(native, player, id); }
       catch (error) { _log('pip mode restore retry failed: $error'); }
     }
   }
 
-  Future<void> _restorePiPRenderingMode(NativePlayer native) async {
+  Future<void> _restorePiPRenderingMode(NativePlayer native,
+      [Player? player, String? id]) async {
+    if (player != null && (id == null || _disposed || _requestedId != id || _player != player)) return;
     final previousSwFast = _pipPreviousSwFast;
     if (previousSwFast != null) {
-      await native.setProperty('sw-fast', previousSwFast);
-      _pipPreviousSwFast = null;
+      await native.setProperty('sw-fast', previousSwFast)
+          .timeout(const Duration(seconds: 2));
+      if (player == null ||
+          (!_disposed && _requestedId == id && _player == player &&
+              _pipPreviousSwFast == previousSwFast)) {
+        _pipPreviousSwFast = null;
+      }
     }
   }
 
@@ -262,38 +431,147 @@ class MediaKitPlayback extends ChangeNotifier {
     return false;
   }
 
-  Future<bool> _seek(Player player, String id, double target) async {
+  Future<bool> _seek(Player player, String id, double target, int intent,
+      MediaKitCommandPermit permit) async {
     if (!target.isFinite || target < 0) return false;
     final native = player.platform as NativePlayer;
     await player.pause();
     await native.command(['seek', target.toStringAsFixed(6), 'absolute+exact']);
+    if (!_allows(permit, id, player) || !_seekIntent.isLatest(intent)) {
+      _scheduleLatestSeekIntent(player, id);
+      return false;
+    }
     final elapsed = Stopwatch()..start();
     var settled = 0;
-    while (elapsed.elapsedMilliseconds < 6000 && _requestedId == id && !_disposed) {
+    while (elapsed.elapsedMilliseconds < 6000 && _allows(permit, id, player) &&
+        _seekIntent.isLatest(intent)) {
       await Future<void>.delayed(const Duration(milliseconds: 25));
-      final seeking = await native.getProperty('seeking');
-      final position = double.tryParse(await native.getProperty('time-pos'));
+      final seeking = await _property(native, 'seeking');
+      final position = double.tryParse(await _property(native, 'time-pos') ?? '');
       final idle = seeking == 'no' || seeking == 'false';
       if (idle && position != null && position.isFinite && (position - target).abs() <= 0.35) {
         settled++;
         if (settled >= 2) {
           _log('seek settled target=${target.toStringAsFixed(3)} position=${position.toStringAsFixed(3)} elapsed=${elapsed.elapsedMilliseconds}ms');
           await _refresh(player, id);
-          return _requestedId == id;
+          return _allows(permit, id, player) && _seekIntent.isLatest(intent);
         }
       } else { settled = 0; }
+    }
+    if (!_seekIntent.isLatest(intent) || !permit.isValid) {
+      _scheduleLatestSeekIntent(player, id);
+      return false;
     }
     _log('seek not confirmed target=${target.toStringAsFixed(3)}');
     await _refresh(player, id);
     return false;
   }
 
+  void _scheduleLatestPlayIntent(Player player, String id) {
+    if (!_sameSession(player, id)) return;
+    if (_playRepairs.containsKey(player)) {
+      _playRepairs[player] = true;
+      return;
+    }
+    _playRepairs[player] = true;
+    final generation = _repairGeneration;
+    final budget = MediaKitRepairBudget();
+    unawaited(() async {
+      try {
+        while (_playRepairs[player] == true && _sameSession(player, id) &&
+            generation == _repairGeneration && budget.beginAttempt()) {
+          _playRepairs[player] = false;
+          final version = _playIntent.version;
+          final operation = _playIntent.value == true ? player.play() : player.pause();
+          final weakPlayer = WeakReference<Player>(player);
+          unawaited(operation.then<void>((_) {
+            final latePlayer = weakPlayer.target;
+            if (latePlayer != null && generation == _repairGeneration &&
+                _sameSession(latePlayer, id) &&
+                !_playIntent.isLatest(version)) {
+              _scheduleLatestPlayIntent(latePlayer, id);
+            }
+          }, onError: (_) {}));
+          try {
+            await operation.timeout(const Duration(seconds: 1));
+          } on TimeoutException {
+            _log('play intent recovery timed out; late completion is guarded');
+            if (_playRepairs[player] == true) continue;
+            break;
+          }
+          if (!_playIntent.isLatest(version)) _playRepairs[player] = true;
+        }
+      } catch (error) { _log('play intent recovery failed: $error'); }
+      finally { _playRepairs.remove(player); }
+    }());
+  }
+
+  void _scheduleLatestSeekIntent(Player player, String id) {
+    if (!_sameSession(player, id)) return;
+    if (_seekRepairs.containsKey(player)) {
+      _seekRepairs[player] = true;
+      return;
+    }
+    _seekRepairs[player] = true;
+    final generation = _repairGeneration;
+    final budget = MediaKitRepairBudget();
+    unawaited(() async {
+      try {
+        final native = player.platform as NativePlayer;
+        while (_seekRepairs[player] == true && _sameSession(player, id) &&
+            generation == _repairGeneration && budget.beginAttempt()) {
+          _seekRepairs[player] = false;
+          final version = _seekIntent.version;
+          final target = _seekIntent.value;
+          if (target == null || !target.isFinite || target < 0) break;
+          final operation = native.command([
+            'seek', target.toStringAsFixed(6), 'absolute+exact',
+          ]);
+          final weakPlayer = WeakReference<Player>(player);
+          unawaited(operation.then<void>((_) {
+            final latePlayer = weakPlayer.target;
+            if (latePlayer != null && generation == _repairGeneration &&
+                _sameSession(latePlayer, id) &&
+                !_seekIntent.isLatest(version)) {
+              _scheduleLatestSeekIntent(latePlayer, id);
+            }
+          }, onError: (_) {}));
+          try {
+            await operation.timeout(const Duration(seconds: 1));
+          } on TimeoutException {
+            _log('seek intent recovery timed out; late completion is guarded');
+            if (_seekRepairs[player] == true) continue;
+            break;
+          }
+          if (!_seekIntent.isLatest(version)) _seekRepairs[player] = true;
+        }
+      } catch (error) { _log('seek intent recovery failed: $error'); }
+      finally { _seekRepairs.remove(player); }
+    }());
+  }
+
   Future<void> _heartbeat(Player player, String id) async {
-    if (_refreshing || _releasing || _disposed || _requestedId != id) return;
+    if (_refreshing || _releasing || _disposed || _requestedId != id || _player != player) return;
+    final epoch = _refreshEpoch;
     _refreshing = true;
     try { await _refresh(player, id); }
     catch (error) { _log('state: $error'); }
-    finally { _refreshing = false; }
+    finally {
+      if (_refreshEpoch == epoch && _player == player && _requestedId == id) {
+        _refreshing = false;
+      }
+    }
+  }
+
+  Future<void> _handleRuntimeError(Player player, String id, String message) async {
+    if (_disposed || _player != player || _requestedId != id) return;
+    _log('runtime: $message');
+    if (classifyMediaKitRuntimeError(message) != MediaKitRuntimeErrorKind.fatal) return;
+    _failure = 'media_kit_open_failed';
+    _ready = false;
+    _timer?.cancel();
+    _timer = null;
+    await _publishFailure(id);
   }
 
   Future<String?> _property(NativePlayer native, String name) async {
@@ -356,12 +634,14 @@ class MediaKitPlayback extends ChangeNotifier {
       'tracks': {'audioTracks': audioRows, 'subtitleTracks': subtitleRows,
         'audioTrack': audio.indexWhere((track) => track.id == values[3]),
         'subtitleTrack': subtitles.indexWhere((track) => track.id == values[4])},
-    });
+    }).timeout(const Duration(seconds: 2));
   }
 
-  Future<void> _publishFailure() async {
+  Future<void> _publishFailure([String? sessionId]) async {
+    final id = sessionId ?? engineId;
     try {
-      await _channel.invokeMethod<bool>('state', {'engineId': engineId, 'failure': _failure});
+      await _channel.invokeMethod<bool>('state', {'engineId': id, 'failure': _failure})
+          .timeout(const Duration(seconds: 2));
     } catch (_) {}
   }
 
@@ -371,7 +651,7 @@ class MediaKitPlayback extends ChangeNotifier {
     if (_errors.length > 40) _errors.removeAt(0);
   }
 
-  Future<void> _release() async {
+  Future<bool> _release() async {
     final player = _player;
     final subscriptions = List<StreamSubscription<dynamic>>.from(_subscriptions);
     final timer = _timer;
@@ -382,22 +662,33 @@ class MediaKitPlayback extends ChangeNotifier {
     engineId = '';
     _ready = false;
     _refreshing = false;
+    _refreshEpoch++;
+    _repairGeneration++;
+    _playRepairs.clear();
+    _seekRepairs.clear();
+    _releaseOperations++;
     _releasing = true;
     _timedOutProperties.clear();
     _pipPreviousSwFast = null;
     _pipVideoTrack = null;
     timer?.cancel();
     if (!_disposed) notifyListeners();
-    try {
-      await (() async {
+    if (player != null || subscriptions.isNotEmpty) {
+      _cleanup.add(() async {
         for (final subscription in subscriptions) { await subscription.cancel(); }
         await player?.dispose();
-      })().timeout(const Duration(seconds: 3));
-    } on TimeoutException {
-      _log('release timed out; previous engine quarantined');
-    } catch (error) {
-      _log('release failed: $error');
-    } finally { _releasing = false; }
+      });
+    }
+    final cleaned = await _cleanup.drain(const Duration(seconds: 3));
+    if (!cleaned) {
+      final error = _cleanup.lastError;
+      _log(error == null
+          ? 'release timed out; previous engine quarantined'
+          : 'release failed; cleanup retained for retry: $error');
+    }
+    _releaseOperations--;
+    _releasing = _releaseOperations > 0;
+    return cleaned;
   }
 
   @override
@@ -406,7 +697,10 @@ class MediaKitPlayback extends ChangeNotifier {
     _channel.setMethodCallHandler(null);
     _timer?.cancel();
     _commandEpoch++;
-    _commands = _release().catchError((Object error) { _log('dispose: $error'); });
+    for (final active in _activePermits) { active.invalidate(); }
+    _commands = _release()
+        .then<void>((_) {})
+        .catchError((Object error) { _log('dispose: $error'); });
     super.dispose();
   }
 }
