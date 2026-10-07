@@ -245,6 +245,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
   Timer? feedbackTimer;
   Timer? levelUpdateTimer;
   Timer? levelFeedbackTimer;
+  Timer? lockButtonTimer;
   String? seekFeedback;
   Object? feedbackGeneration;
   String? levelKind;
@@ -355,12 +356,36 @@ class _PlaybackPageState extends State<PlaybackPage> {
     }
     if (mounted) setState(() {});
   }
+
+  void scheduleLockButtonHide() {
+    lockButtonTimer?.cancel();
+    lockButtonTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted && locked) setState(() => controlsVisible = false);
+    });
+  }
+
+  void showUnlockButton() {
+    if (!locked) return;
+    if (!controlsVisible) setState(() => controlsVisible = true);
+    scheduleLockButtonHide();
+  }
+
+  void toggleControlLock() {
+    lockButtonTimer?.cancel();
+    setState(() {
+      locked = !locked;
+      controlsVisible = true;
+    });
+    if (locked) scheduleLockButtonHide();
+  }
+
   @override
   void dispose() {
     feedbackTimer?.cancel();
     previewTimer?.cancel();
     levelUpdateTimer?.cancel();
     levelFeedbackTimer?.cancel();
+    lockButtonTimer?.cancel();
     if (dragging != null && !endingDrag) m.cancelScrub();
     m.removeListener(changed);
     m.command('restoreBrightness');
@@ -933,6 +958,10 @@ class _PlaybackPageState extends State<PlaybackPage> {
         onVerticalDragCancel: m.state['isAudio'] != true ? finishLevelDrag : null,
         child: const SizedBox.expand())),
     ]),
+    if (locked) GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: showUnlockButton,
+      child: const SizedBox.expand()),
     if (levelKind != null && levelValue != null && !locked) levelFeedback(),
     if (seekFeedback != null && !locked) IgnorePointer(child: Center(
       child: Container(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
@@ -957,9 +986,13 @@ class _PlaybackPageState extends State<PlaybackPage> {
       ])),
     if (controlsVisible || locked) Align(alignment: Alignment.centerLeft,
       child: Padding(padding: const EdgeInsets.only(left: 12),
-        child: playbackButton(Icon(locked ? Icons.lock : Icons.lock_open),
-          locked ? '解锁控件' : '锁定控件',
-          () => setState(() { locked = !locked; controlsVisible = true; })))),
+        child: AnimatedOpacity(
+          opacity: controlsVisible ? 1 : 0,
+          duration: const Duration(milliseconds: 200),
+          child: IgnorePointer(
+            ignoring: !controlsVisible,
+            child: playbackButton(Icon(locked ? Icons.lock : Icons.lock_open),
+              locked ? '解锁控件' : '锁定控件', toggleControlLock))))),
     if (controlsVisible && !locked) Align(alignment: Alignment.centerRight,
       child: Padding(padding: const EdgeInsets.only(right: 12),
         child: Flex(direction: MediaQuery.sizeOf(context).height < 500 ? Axis.horizontal : Axis.vertical,
