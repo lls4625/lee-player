@@ -10,15 +10,44 @@ import 'developer_tip.dart';
 import 'app_licenses.dart';
 import 'app_localizations.dart';
 
+const _privacyPolicyUrl =
+    'https://www.wlsp1881.com/leeplayer/privacy-policy.html';
+const _appChannel = MethodChannel('lei.player/app');
+
 class LegalDocumentPage extends StatelessWidget {
   const LegalDocumentPage({
     super.key,
     required this.title,
     required this.content,
+    this.onlineUrl,
   });
 
   final String title;
   final String content;
+  final String? onlineUrl;
+
+  Future<void> _openOnlineDocument(BuildContext context) async {
+    var opened = false;
+    try {
+      opened =
+          await _appChannel.invokeMethod<bool>('openUrl', <String, String>{
+            'url': onlineUrl!,
+          }) ??
+          false;
+    } on PlatformException {
+      opened = false;
+    } on MissingPluginException {
+      opened = false;
+    }
+    if (opened || !context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          AppLocalizations.of(context).text('无法打开在线隐私政策，请稍后重试。'),
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -53,9 +82,20 @@ class LegalDocumentPage extends StatelessWidget {
             child: ListView.separated(
               key: const Key('legal-document-content'),
               padding: const EdgeInsets.fromLTRB(24, 18, 24, 40),
-              itemCount: blocks.length,
+              itemCount: blocks.length + (onlineUrl == null ? 0 : 1),
               separatorBuilder: (_, _) => const SizedBox(height: 18),
               itemBuilder: (context, index) {
+                if (index == blocks.length) {
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: FilledButton.icon(
+                      key: const Key('open-online-privacy-policy'),
+                      onPressed: () => _openOnlineDocument(context),
+                      icon: const Icon(Icons.open_in_new_rounded),
+                      label: const LText('查看在线隐私政策'),
+                    ),
+                  );
+                }
                 final block = blocks[index].trim();
                 final heading = RegExp(r'^(?:[一二三四五六七八九十]+、|\d+[.、])')
                     .hasMatch(block);
@@ -103,8 +143,15 @@ PageRouteBuilder<void> _opaquePageRoute(WidgetBuilder builder) =>
 PageRouteBuilder<void> legalDocumentRoute({
   required String title,
   required String content,
+  String? onlineUrl,
 }) =>
-    _opaquePageRoute((_) => LegalDocumentPage(title: title, content: content));
+    _opaquePageRoute(
+      (_) => LegalDocumentPage(
+        title: title,
+        content: content,
+        onlineUrl: onlineUrl,
+      ),
+    );
 
 PageRouteBuilder<void> openSourceLicensesRoute(ThemeData theme) {
   final colors = theme.colorScheme;
@@ -125,9 +172,8 @@ PageRouteBuilder<void> openSourceLicensesRoute(ThemeData theme) {
       ),
       child: LicensePage(
         applicationName: '雷player',
-        applicationVersion: '0.1.0',
         applicationLegalese: AppLocalizations.of(context).text(
-          'Copyright © 2026 李连顺. All rights reserved.\n第三方组件适用各自许可证；联系邮箱：32661267@qq.com',
+          'Copyright © 2026 李连顺. All rights reserved.\n第三方组件适用各自许可证；用户支持 QQ 群：1126527885',
         ),
       ),
     ),
@@ -1005,7 +1051,11 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     );
   }
 
-  Future<void> showLegalDocument(String title, String asset) async {
+  Future<void> showLegalDocument(
+    String title,
+    String asset, {
+    String? onlineUrl,
+  }) async {
     final code = AppLocalizations.of(context).code;
     final localizedAsset = code == 'zh-Hans'
         ? asset
@@ -1014,8 +1064,13 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
               .replaceFirst('assets/legal/', 'assets/legal/l10n/');
     final content = await rootBundle.loadString(localizedAsset);
     if (!mounted) return;
-    await Navigator.of(context)
-        .push(legalDocumentRoute(title: title, content: content));
+    await Navigator.of(context).push(
+      legalDocumentRoute(
+        title: title,
+        content: content,
+        onlineUrl: onlineUrl,
+      ),
+    );
   }
 
   void showOpenSourceLicenses() {
@@ -1196,8 +1251,11 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           leading: const LeiMediaIcon(icon: Icons.privacy_tip_outlined),
           title: const LText('隐私政策'),
           subtitle: const LText('本地数据处理、保留与联系信息'),
-          onTap: () =>
-              showLegalDocument('隐私政策', 'assets/legal/PRIVACY_POLICY.txt'),
+          onTap: () => showLegalDocument(
+            '隐私政策',
+            'assets/legal/PRIVACY_POLICY.txt',
+            onlineUrl: _privacyPolicyUrl,
+          ),
         ),
         LeiGlassTile(
           flat: true,

@@ -1361,10 +1361,20 @@ class AppLocalizations {
       'ja': 'すべての情熱が実を結びますように。',
       'en': 'May every passion find its echo.',
     },
-    '第三方组件适用各自许可证；联系邮箱：32661267@qq.com': {
-      'zh-Hant': '第三方元件適用各自授權；聯絡信箱：32661267@qq.com',
-      'ja': '第三者コンポーネントには各ライセンスが適用されます。連絡先：32661267@qq.com',
-      'en': 'Third-party components are governed by their respective licenses. Contact: 32661267@qq.com',
+    '第三方组件适用各自许可证；用户支持 QQ 群：1126527885': {
+      'zh-Hant': '第三方元件適用各自授權；使用者支援 QQ 群：1126527885',
+      'ja': '第三者コンポーネントには各ライセンスが適用されます。ユーザーサポート QQ グループ：1126527885',
+      'en': 'Third-party components are governed by their respective licenses. User support QQ group: 1126527885',
+    },
+    '查看在线隐私政策': {
+      'zh-Hant': '查看線上隱私權政策',
+      'ja': 'オンラインのプライバシーポリシーを表示',
+      'en': 'View Online Privacy Policy',
+    },
+    '无法打开在线隐私政策，请稍后重试。': {
+      'zh-Hant': '無法開啟線上隱私權政策，請稍後再試。',
+      'ja': 'オンラインのプライバシーポリシーを開けません。後でもう一度お試しください。',
+      'en': 'Unable to open the online privacy policy. Try again later.',
     },
   };
 

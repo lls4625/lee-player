@@ -1,8 +1,8 @@
 雷player Privacy Policy
 
-Effective: October 2, 2026
+Effective: October 7, 2026
 Developer: Lianshun Li
-Contact: 32661267@qq.com
+User support QQ group: 1126527885
 
 1. Scope
 
@@ -40,4 +40,4 @@ Local playback records and settings remain until you clear them in the app, dele
 
 8. Changes and Contact
 
-If features or data practices change, this policy will be updated with the app and its effective date revised. Questions about privacy or this policy may be sent to 32661267@qq.com.
+If features or data practices change, this policy will be updated with the app and its effective date revised. For questions about privacy or this policy, join QQ group 1126527885.
