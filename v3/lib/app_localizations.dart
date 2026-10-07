@@ -1154,7 +1154,7 @@ class AppLocalizations {
     '特别支持': {'zh-Hant': '特別支持', 'ja': '特別な応援', 'en': 'Special Support'},
     '大力支持': {'zh-Hant': '大力支持', 'ja': '力強い応援', 'en': 'Big Support'},
     '顶级鼓励': {'zh-Hant': '頂級鼓勵', 'ja': '最高の応援', 'en': 'Top Support'},
-    '夯': {'zh-Hant': '夯', 'ja': '全力応援', 'en': 'Ultimate Support'},
+    '鼎力支持': {'zh-Hant': '鼎力支持', 'ja': '全力応援', 'en': 'Ultimate Support'},
     '跳过': {'zh-Hant': '跳過', 'ja': 'スキップ', 'en': 'Skip'},
     '导入会复制到 App 课程目录，原文件保留；重名文件自动编号。': {
       'zh-Hant': '匯入內容會複製到 App 課程目錄，原始檔案會保留；同名檔案會自動編號。',

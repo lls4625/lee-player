@@ -66,6 +66,14 @@ class DeveloperTipController extends ChangeNotifier
     'vip.ichiki.javalee.leeplayer.tip.strong',
     'vip.ichiki.javalee.leeplayer.tip.premium',
   ];
+  static const displayNameKeys = <String, String>{
+    'vip.ichiki.javalee.leeplayer.tip.small': '一份鼓励',
+    'vip.ichiki.javalee.leeplayer.tip.medium': '暖心支持',
+    'vip.ichiki.javalee.leeplayer.tip.large': '特别支持',
+    'vip.ichiki.javalee.leeplayer.tip.xlarge': '大力支持',
+    'vip.ichiki.javalee.leeplayer.tip.premium': '顶级鼓励',
+    'vip.ichiki.javalee.leeplayer.tip.strong': '鼎力支持',
+  };
   final List<DeveloperTipProduct> _products = <DeveloperTipProduct>[];
   bool _initialized = false;
   bool _loading = false;
@@ -448,49 +456,57 @@ class _TipCard extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    enabled: enabled,
-    label: '${AppLocalizations.of(context).text(product.name)}，${product.price}',
-    child: GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: enabled ? onTap : null,
-      child: Opacity(
-        opacity: enabled ? 1 : .55,
-        child: LeiSurface(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 16),
-          child: Center(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                LText(
-                  product.name,
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (processing) ...[
-                      const GlassProgressIndicator.circular(size: 20),
-                      const SizedBox(width: 8),
+  Widget build(BuildContext context) {
+    final localizations = AppLocalizations.of(context);
+    final nameKey = DeveloperTipController.displayNameKeys[product.id];
+    final displayName = nameKey == null
+        ? product.name
+        : localizations.text(nameKey);
+
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      label: '$displayName，${product.price}',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: enabled ? onTap : null,
+        child: Opacity(
+          opacity: enabled ? 1 : .55,
+          child: LeiSurface(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 16),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    displayName,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (processing) ...[
+                        const GlassProgressIndicator.circular(size: 20),
+                        const SizedBox(width: 8),
+                      ],
+                      Text(
+                        product.price,
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.titleLarge
+                            ?.copyWith(color: leiAccent(context)),
+                      ),
                     ],
-                    LText(
-                      product.price,
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.titleLarge
-                          ?.copyWith(color: leiAccent(context)),
-                    ),
-                  ],
-                ),
-              ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 enum _FireworkStyle { comet, heart, burst, waterfall, ring, finale }
@@ -555,7 +571,7 @@ class _TipCelebrationLevel {
     ),
     _TipCelebrationLevel(
       'vip.ichiki.javalee.leeplayer.tip.strong',
-      '夯',
+      '鼎力支持',
       _FireworkStyle.finale,
       10,
       360,

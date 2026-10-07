@@ -96,12 +96,12 @@
       "localizations" : [
         {
           "description" : "一次性支持雷player持续开发，不解锁额外功能，不可恢复。",
-          "displayName" : "夯",
+          "displayName" : "鼎力支持",
           "locale" : "zh_Hans"
         }
       ],
       "productID" : "vip.ichiki.javalee.leeplayer.tip.strong",
-      "referenceName" : "夯",
+      "referenceName" : "鼎力支持",
       "type" : "Consumable"
     }
   ],
