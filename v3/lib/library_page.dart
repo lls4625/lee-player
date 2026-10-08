@@ -431,7 +431,6 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                       ),
                       title: const LText('导入课程文件夹'),
                       subtitle: const LText('保留课程目录与子文件夹'),
-                      trailing: const LeiMediaIcon(icon: Icons.chevron_right),
                       onTap: () => Navigator.pop(context, 'folder'),
                     ),
                     LeiGlassTile(
@@ -440,7 +439,6 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                       ),
                       title: const LText('选择媒体文件'),
                       subtitle: const LText('视频、音频及外置字幕'),
-                      trailing: const LeiMediaIcon(icon: Icons.chevron_right),
                       onTap: () => Navigator.pop(context, 'files'),
                     ),
                     LeiGlassTile(
@@ -449,7 +447,6 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                       ),
                       title: const LText('新建文件夹'),
                       subtitle: const LText('按课程或章节整理内容'),
-                      trailing: const LeiMediaIcon(icon: Icons.chevron_right),
                       onTap: () => Navigator.pop(context, 'new'),
                     ),
                     const Padding(
