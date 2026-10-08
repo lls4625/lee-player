@@ -1309,6 +1309,9 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     return ListView.builder(
       key: const Key('settings-list'),
       padding: const EdgeInsets.only(bottom: 24),
+      // Keep the next group of glass controls ready before it enters the
+      // viewport, avoiding shader/widget setup during an active scroll.
+      cacheExtent: MediaQuery.sizeOf(context).height * .75,
       itemCount: sections.length,
       itemBuilder: (context, index) => sections[index](),
     );
