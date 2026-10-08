@@ -63,10 +63,18 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
   }
 
   String durationLabel(int minutes) {
-    if (minutes < 60) return '$minutes 分钟';
+    final localizations = AppLocalizations.of(context);
+    if (minutes < 60) {
+      return localizations.text('{minutes} 分钟', args: {'minutes': minutes});
+    }
     final hours = minutes ~/ 60;
     final rest = minutes % 60;
-    return rest == 0 ? '$hours 小时' : '$hours 小时 $rest 分钟';
+    return rest == 0
+        ? localizations.text('{hours} 小时', args: {'hours': hours})
+        : localizations.text(
+            '{hours} 小时 {minutes} 分钟',
+            args: {'hours': hours, 'minutes': rest},
+          );
   }
 
   void close([double? result]) {
@@ -98,7 +106,9 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
     final selected = enteredMinutes == minutes;
     return SizedBox(width: width, child: GlassButton.custom(
       onTap: () => selectPreset(minutes),
-      label: AppLocalizations.of(context).text('$minutes 分钟'),
+      label: AppLocalizations.of(
+        context,
+      ).text('{minutes} 分钟', args: {'minutes': minutes}),
       height: 48, shape: leiRoundedControlShape,
       style: selected ? GlassButtonStyle.prominent : GlassButtonStyle.filled,
       glowColor: selected ? leiGold.withValues(alpha: .42) : null,
@@ -128,7 +138,10 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
     final minutes = enteredMinutes;
     final valid = minutes != null && minutes >= 1 && minutes <= 1440;
     final subtitle = widget.timerActive
-      ? '当前剩余 ${timeLabel(widget.remainingSeconds)}，可重新设置或关闭'
+      ? AppLocalizations.of(context).text(
+          '当前剩余 {time}，可重新设置或关闭',
+          args: {'time': timeLabel(widget.remainingSeconds)},
+        )
       : '播放将在设定时间后自动停止';
     return GlassContainer(
       useOwnLayer: true,
@@ -217,7 +230,8 @@ class _SleepTimerDialogState extends State<_SleepTimerDialog> {
               const SizedBox(height: 12),
               GlassButton.custom(
                 onTap: () => close(0.0),
-                label: '关闭当前定时', height: 42,
+                label: AppLocalizations.of(context).text('关闭当前定时'),
+                height: 42,
                 shape: const LiquidRoundedSuperellipse(borderRadius: 14),
                 style: GlassButtonStyle.transparent,
                 glowColor: Colors.redAccent.withValues(alpha: .35),
@@ -268,7 +282,12 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (!success || m.path != path || m.state['generation'] != generation) return;
     feedbackTimer?.cancel();
     feedbackGeneration = generation;
-    setState(() => seekFeedback = '${delta < 0 ? '后退' : '前进'}至 ${timeLabel(target)}');
+    setState(
+      () => seekFeedback = AppLocalizations.of(context).text(
+        delta < 0 ? '后退至 {time}' : '前进至 {time}',
+        args: {'time': timeLabel(target)},
+      ),
+    );
     feedbackTimer = Timer(const Duration(milliseconds: 1200), () {
       if (mounted) setState(() => seekFeedback = null);
     });
@@ -448,7 +467,9 @@ class _PlaybackPageState extends State<PlaybackPage> {
     return IgnorePointer(child: Center(child: Semantics(
       liveRegion: true,
       label: AppLocalizations.of(context).text(
-        '${brightness ? '屏幕亮度' : '播放音量'} $percent%'),
+        brightness ? '屏幕亮度 {percent}%' : '播放音量 {percent}%',
+        args: {'percent': percent},
+      ),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 90),
         curve: Curves.easeOut,
@@ -506,7 +527,12 @@ class _PlaybackPageState extends State<PlaybackPage> {
       if (mounted) setState(() => pipCommandPending = false);
     }
   }
-  Future<T?> choose<T>(String title, Map<T, String> choices, {T? selected}) {
+  Future<T?> choose<T>(
+    String title,
+    Map<T, String> choices, {
+    T? selected,
+    bool localizeChoices = true,
+  }) {
     final entries = choices.entries.toList();
     return showLeiSheet<T>(context: context, platformViewBackdrop: true,
       builder: (context) => SafeArea(child: SizedBox(
@@ -515,8 +541,13 @@ class _PlaybackPageState extends State<PlaybackPage> {
           LeiSheetHeading(title: title, platformViewBackdrop: true),
           Expanded(child: ListView.builder(itemCount: entries.length, itemBuilder: (context, index) {
             final choice = entries[index];
-            return LeiGlassTile(title: LText(choice.value,
-              style: choice.key == selected ? TextStyle(color: leiAccent(context), fontWeight: FontWeight.w600) : null),
+            final style = choice.key == selected
+                ? TextStyle(color: leiAccent(context), fontWeight: FontWeight.w600)
+                : null;
+            return LeiGlassTile(
+              title: localizeChoices
+                  ? LText(choice.value, style: style)
+                  : Text(choice.value, style: style),
               trailing: choice.key == selected ? const LeiMediaIcon(icon: Icons.check) : null,
               onTap: () => Navigator.pop(context, choice.key));
           })),
@@ -531,7 +562,14 @@ class _PlaybackPageState extends State<PlaybackPage> {
     final selected = await showLeiSheet<int>(context: context, platformViewBackdrop: true,
       builder: (context) => SafeArea(child: SizedBox(height: MediaQuery.sizeOf(context).height * .7,
         child: Column(children: [
-          LeiSheetHeading(title: '播放队列', subtitle: '${paths.length} 个媒体 · 按课程顺序播放', platformViewBackdrop: true),
+          LeiSheetHeading(
+            title: '播放队列',
+            subtitle: AppLocalizations.of(context).text(
+              '{count} 个媒体 · 按课程顺序播放',
+              args: {'count': paths.length},
+            ),
+            platformViewBackdrop: true,
+          ),
           if (paths.isEmpty) const Padding(padding: EdgeInsets.all(24), child: LText('队列为空，请返回课程库选择媒体。')),
           Expanded(child: ListView.builder(itemCount: paths.length, itemBuilder: (context, index) {
             final current = index == selectedIndex;
@@ -541,9 +579,16 @@ class _PlaybackPageState extends State<PlaybackPage> {
               leading: SizedBox(width: 48, child: current
                 ? const LeiMediaIcon(icon: Icons.graphic_eq_rounded)
                 : LText('${index + 1}', textAlign: TextAlign.center)),
-              title: LText(paths[index].split('/').last, maxLines: 2, overflow: TextOverflow.ellipsis,
+              title: Text(paths[index].split('/').last, maxLines: 2, overflow: TextOverflow.ellipsis,
                 style: current ? const TextStyle(color: leiGold, fontWeight: FontWeight.w600) : null),
-              subtitle: LText(current ? '当前课程' : position > 0 ? '上次播至 ${timeLabel(position)}' : '尚未记录进度'),
+              subtitle: current
+                  ? const LText('当前课程')
+                  : position > 0
+                  ? LText(
+                      '上次播至 {time}',
+                      args: {'time': timeLabel(position)},
+                    )
+                  : const LText('尚未记录进度'),
               onTap: () => Navigator.pop(context, index));
           })),
         ]))));
@@ -667,7 +712,13 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (kind == 'external') {
       final subtitles = m.entries.where((e) => e.kind == 'subtitle').toList()..sort((a, b) => naturalCompare(a.path, b.path));
       if (subtitles.isEmpty) { showLeiToast(context, '请先回课程库，通过 + 导入字幕文件'); return; }
-      final path = await choose<String>(m.state['engine'] == 'media_kit' ? '外置字幕' : '外置字幕 · 画中画内不显示', {for (final e in subtitles) e.path: e.path});
+      final path = await choose<String>(
+        m.state['engine'] == 'media_kit'
+            ? '外置字幕'
+            : '外置字幕 · 画中画内不显示',
+        {for (final e in subtitles) e.path: e.path},
+        localizeChoices: false,
+      );
       if (path != null) await m.command('subtitle', args: {'path': path});
     } else {
       await chooseTrack(kind);
@@ -690,7 +741,10 @@ class _PlaybackPageState extends State<PlaybackPage> {
           return SafeArea(child: SizedBox(
             height: MediaQuery.sizeOf(context).height * .7,
             child: Column(children: [
-              LeiGlassTile(title: LText('${kind == 'audio' ? '音轨' : '字幕'} · ${options.length} 条'),
+              LeiGlassTile(title: LText(
+                kind == 'audio' ? '音轨 · {count} 条' : '字幕 · {count} 条',
+                args: {'count': options.length},
+              ),
                 subtitle: LText(!sameMedia ? '媒体已变化，请关闭后重新选择'
                   : busy ? '正在确认轨道切换…' : '列表随播放状态更新')),
               if (sameMedia && options.isEmpty) const LeiGlassTile(title: LText('暂未发现轨道')),
@@ -699,8 +753,12 @@ class _PlaybackPageState extends State<PlaybackPage> {
                   final row = rows[rowIndex];
                   final index = (row['index'] as num).toInt();
                   final details = row['details'] as String? ?? '';
-                  return LeiGlassTile(title: LText('${row['name']}'),
-                    subtitle: details.isEmpty ? null : LText(details),
+                  final rowName = '${row['name']}';
+                  return LeiGlassTile(
+                    title: rowName == '关闭字幕'
+                        ? const LText('关闭字幕')
+                        : Text(rowName),
+                    subtitle: details.isEmpty ? null : Text(details),
                     trailing: index == selected ? const LeiMediaIcon(icon: Icons.check) : null,
                     onTap: busy ? null : () async {
                       if (submitting || m.state['generation'] != session) return;
@@ -722,13 +780,18 @@ class _PlaybackPageState extends State<PlaybackPage> {
     );
   }
   Future<void> moreOptions() async {
+    final localizations = AppLocalizations.of(context);
     final action = await choose<String>('播放选项', {
       'favorite': m.record(m.path)['favorite'] == true ? '取消收藏' : '收藏当前媒体',
       'previous': '上一节',
       'next': '下一节',
       'repeat': modes[m.state['mode']] ?? '循环模式',
       'sleep': m.number('sleepRemaining') > 0
-        ? '定时停止 · ${timeLabel(m.number('sleepRemaining'))}' : '定时停止',
+        ? localizations.text(
+            '定时停止 · {time}',
+            args: {'time': timeLabel(m.number('sleepRemaining'))},
+          )
+        : '定时停止',
       'fit': '画面比例',
       'ab': 'A–B 片段复读',
       'levels': '音量与亮度',
@@ -756,15 +819,33 @@ class _PlaybackPageState extends State<PlaybackPage> {
       case 'levels': await adjustmentSheet(false); break;
       case 'tracks': await tracks(); break;
       case 'status':
+        final playbackMode = m.state['continuous'] == false
+            ? localizations.text('播完当前停止')
+            : localizations.text(modes[m.state['mode']] ?? '文件夹循环');
         await showLeiDialog<void>(context: context, title: '当前播放状态',
           platformViewBackdrop: true,
           message: [
-            '${m.number('index').toInt() + 1} / ${m.queue.length} · ${m.state['continuous'] == false ? '播完当前停止' : modes[m.state['mode']] ?? '文件夹循环'}',
-            if (m.number('introSkipped') > 0) '已跳过片头 ${timeLabel(m.number('introSkipped'))} · 可拖回开头查看',
+            localizations.text(
+              '{current} / {total} · {mode}',
+              args: {
+                'current': m.number('index').toInt() + 1,
+                'total': m.queue.length,
+                'mode': playbackMode,
+              },
+            ),
+            if (m.number('introSkipped') > 0)
+              localizations.text(
+                '已跳过片头 {time} · 可拖回开头查看',
+                args: {'time': timeLabel(m.number('introSkipped'))},
+              ),
             if ((m.state['engineNotice'] as String? ?? '').isNotEmpty)
               AppLocalizations.of(context).message(AppMessage(m.state['engineNotice'] as String)),
-            if ((m.state['subtitleName'] as String? ?? '').isNotEmpty) '字幕：${m.state['subtitleName']}',
+            if ((m.state['subtitleName'] as String? ?? '').isNotEmpty)
+              localizations.text('字幕：{name}', args: {
+                'name': m.state['subtitleName'],
+              }),
           ].join('\n\n'),
+          localizeMessage: false,
           actions: [GlassDialogAction(label: '关闭',
             onPressed: () => Navigator.of(context, rootNavigator: true).pop())]);
         break;
@@ -788,15 +869,19 @@ class _PlaybackPageState extends State<PlaybackPage> {
           ]),
           const SizedBox(height: 24),
           if (repeat) ...[
-            LText('当前位置 ${timeLabel(m.position)}'),
+            LText('当前位置 {time}', args: {'time': timeLabel(m.position)}),
             const SizedBox(height: 12),
             LeiGlassTile(
-              title: LText(m.number('a', -1) < 0 ? '设置 A 点' : 'A 点 · ${timeLabel(m.number('a'))}'),
+              title: m.number('a', -1) < 0
+                  ? const LText('设置 A 点')
+                  : LText('A 点 · {time}', args: {'time': timeLabel(m.number('a'))}),
               leading: const LeiMediaIcon(icon: Icons.first_page),
               onTap: () => m.configure({'ab': 'a'})),
             const GlassDivider(),
             LeiGlassTile(
-              title: LText(m.number('b', -1) < 0 ? '设置 B 点' : 'B 点 · ${timeLabel(m.number('b'))}'),
+              title: m.number('b', -1) < 0
+                  ? const LText('设置 B 点')
+                  : LText('B 点 · {time}', args: {'time': timeLabel(m.number('b'))}),
               leading: const LeiMediaIcon(icon: Icons.last_page),
               onTap: () => m.configure({'ab': 'b'})),
             const GlassDivider(),
@@ -831,7 +916,10 @@ class _PlaybackPageState extends State<PlaybackPage> {
 
   Widget seekButton({required bool rewind, required int seconds,
     required VoidCallback? action}) {
-    final label = '${rewind ? '后退' : '前进'} $seconds 秒';
+    final label = AppLocalizations.of(context).text(
+      rewind ? '后退 {seconds} 秒' : '前进 {seconds} 秒',
+      args: {'seconds': seconds},
+    );
     final icon = Icon(rewind ? Icons.fast_rewind_rounded : Icons.fast_forward_rounded,
       size: 22);
     final value = LText('$seconds', maxLines: 1, softWrap: false);
@@ -975,10 +1063,14 @@ class _PlaybackPageState extends State<PlaybackPage> {
         playbackButton(const Icon(Icons.arrow_back_ios_new), '返回课程库', () => Navigator.of(context).pop()),
         const SizedBox(width: 12),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-          LText(m.path.split('/').last, maxLines: 1,
+          Text(m.path.split('/').last, maxLines: 1,
             overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 3),
-          LText('第 ${m.queue.isEmpty ? 0 : m.number('index').toInt() + 1} / ${m.queue.length} 节',
+          LText('第 {current} / {total} 节',
+            args: {
+              'current': m.queue.isEmpty ? 0 : m.number('index').toInt() + 1,
+              'total': m.queue.length,
+            },
             style: Theme.of(context).textTheme.labelSmall?.copyWith(color: Colors.white70)),
         ])),
         const SizedBox(width: 12),

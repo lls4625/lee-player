@@ -155,11 +155,13 @@ class LeiGlassIconButton extends StatelessWidget {
     required this.icon,
     required this.onPressed,
     this.tooltip,
+    this.tooltipArgs = const <String, Object?>{},
     this.platformViewBackdrop = false,
   });
   final Widget icon;
   final VoidCallback? onPressed;
   final String? tooltip;
+  final Map<String, Object?> tooltipArgs;
   final bool platformViewBackdrop;
   @override
   Widget build(BuildContext context) {
@@ -168,13 +170,15 @@ class LeiGlassIconButton extends StatelessWidget {
       onPressed: onPressed,
       semanticLabel: tooltip == null
           ? null
-          : AppLocalizations.of(context).text(tooltip!),
+          : AppLocalizations.of(context).text(tooltip!, args: tooltipArgs),
       platformViewBackdrop: platformViewBackdrop,
     );
     return tooltip == null
         ? button
         : Tooltip(
-            message: AppLocalizations.of(context).text(tooltip!),
+            message: AppLocalizations.of(
+              context,
+            ).text(tooltip!, args: tooltipArgs),
             child: button,
           );
   }
@@ -221,6 +225,10 @@ Future<T?> showLeiDialog<T>({
   required BuildContext context,
   required String? title,
   String? message,
+  Map<String, Object?> titleArgs = const <String, Object?>{},
+  Map<String, Object?> messageArgs = const <String, Object?>{},
+  bool localizeTitle = true,
+  bool localizeMessage = true,
   Widget? content,
   bool platformViewBackdrop = false,
   bool fixedNearTop = false,
@@ -255,10 +263,17 @@ Future<T?> showLeiDialog<T>({
               child: GlassDialog(
                 title: title == null
                     ? null
-                    : AppLocalizations.of(context).text(title),
+                    : localizeTitle
+                    ? AppLocalizations.of(context).text(title, args: titleArgs)
+                    : title,
                 message: message == null
                     ? null
-                    : AppLocalizations.of(context).text(message),
+                    : localizeMessage
+                    ? AppLocalizations.of(context).text(
+                        message,
+                        args: messageArgs,
+                      )
+                    : message,
                 content: content,
                 quality: platformViewBackdrop
                     ? GlassQuality.minimal
@@ -405,6 +420,7 @@ class LeiGlassMenu extends StatelessWidget {
     this.items,
     this.icon = Icons.more_vert,
     this.tooltip = '更多操作',
+    this.tooltipArgs = const <String, Object?>{},
     this.selected,
   }) : assert(items == null || choices.isEmpty);
   final Map<String, String> choices;
@@ -412,6 +428,7 @@ class LeiGlassMenu extends StatelessWidget {
   final List<Widget>? items;
   final IconData icon;
   final String tooltip;
+  final Map<String, Object?> tooltipArgs;
   final String? selected;
   @override
   Widget build(BuildContext context) {
@@ -456,6 +473,7 @@ class LeiGlassMenu extends StatelessWidget {
       triggerBuilder: (context, toggle) => LeiGlassIconButton(
         icon: Icon(icon),
         tooltip: tooltip,
+        tooltipArgs: tooltipArgs,
         onPressed: toggle,
       ),
       items: menuItems,

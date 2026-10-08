@@ -462,11 +462,15 @@ class _TipCard extends StatelessWidget {
     final displayName = nameKey == null
         ? product.name
         : localizations.text(nameKey);
+    final accessibilityLabel = localizations.text(
+      '{name}，{price}',
+      args: {'name': displayName, 'price': product.price},
+    );
 
     return Semantics(
       button: true,
       enabled: enabled,
-      label: '$displayName，${product.price}',
+      label: accessibilityLabel,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: enabled ? onTap : null,
@@ -636,7 +640,12 @@ class _FireworksOverlayState extends State<_FireworksOverlay> {
                   Icon(Icons.favorite_rounded, size: 38, color: leiGold),
                   const SizedBox(height: 12),
                   LText(
-                    '感谢你的「${widget.level.label}」！',
+                    '感谢你的「{support}」！',
+                    args: {
+                      'support': AppLocalizations.of(
+                        context,
+                      ).text(widget.level.label),
+                    },
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.titleLarge,
                   ),

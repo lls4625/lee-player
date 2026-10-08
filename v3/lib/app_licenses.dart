@@ -44,7 +44,7 @@ Future<void> _ensureAppLicensesRegistered() async {
       'assets/legal/NATIVE_THIRD_PARTY_NOTICES.txt',
     );
     yield LicenseEntryWithLineBreaks(const [
-      'media_kit 原生播放组件',
+      'media_kit native components',
       'libmpv',
       'FFmpeg',
     ], notices);
@@ -52,16 +52,18 @@ Future<void> _ensureAppLicensesRegistered() async {
       'assets/legal/OPEN_SOURCE_OFFER.txt',
     );
     yield LicenseEntryWithLineBreaks(const [
-      'libmpv / FFmpeg 对应源码与构建材料说明',
+      'libmpv / FFmpeg · SOURCE OFFER',
     ], offer);
     final sourceManifest = await rootBundle.loadString(
       'assets/legal/SOURCE_MANIFEST.txt',
     );
-    yield LicenseEntryWithLineBreaks(const ['原生组件对应源码清单'], sourceManifest);
+    yield LicenseEntryWithLineBreaks(const ['SOURCE MANIFEST'], sourceManifest);
     final relinking = await rootBundle.loadString(
       'assets/legal/RELINKING_IOS.txt',
     );
-    yield LicenseEntryWithLineBreaks(const ['iOS 原生组件重新构建与替换说明'], relinking);
+    yield LicenseEntryWithLineBreaks(const [
+      'iOS RELINKING INSTRUCTIONS',
+    ], relinking);
     for (final entry in _nativeLicenseAssets.entries) {
       final text = await rootBundle.loadString(entry.key);
       yield LicenseEntryWithLineBreaks(entry.value, text);

@@ -108,19 +108,28 @@ class AppLocalizations {
       ? 'zh-Hant'
       : 'zh-Hans';
 
-  String text(String source) {
-    if (source == '雷player' || source == '雷 player' || code == 'zh-Hans')
-      return source;
-    final exact = _messages[source]?[code];
-    if (exact != null) return exact;
+  String text(
+    String source, {
+    Map<String, Object?> args = const <String, Object?>{},
+  }) {
     var value = source;
-    for (final replacement
-        in (code == 'en'
-            ? _en
-            : code == 'ja'
-            ? _ja
-            : _hant)) {
-      value = value.replaceAll(replacement.$1, replacement.$2);
+    if (source != '雷player' && source != '雷 player' && code != 'zh-Hans') {
+      final exact = _messages[source]?[code];
+      if (exact != null) {
+        value = exact;
+      } else {
+        for (final replacement
+            in (code == 'en'
+                ? _en
+                : code == 'ja'
+                ? _ja
+                : _hant)) {
+          value = value.replaceAll(replacement.$1, replacement.$2);
+        }
+      }
+    }
+    for (final entry in args.entries) {
+      value = value.replaceAll('{${entry.key}}', '${entry.value ?? ''}');
     }
     return value;
   }
@@ -1376,6 +1385,198 @@ class AppLocalizations {
       'ja': 'オンラインのプライバシーポリシーを開けません。後でもう一度お試しください。',
       'en': 'Unable to open the online privacy policy. Try again later.',
     },
+    '移动文件': {'zh-Hant': '移動檔案', 'ja': 'ファイルを移動', 'en': 'Move Files'},
+    '导入文件 / 文件夹': {
+      'zh-Hant': '匯入檔案 / 資料夾',
+      'ja': 'ファイル／フォルダを読み込む',
+      'en': 'Import Files / Folder',
+    },
+    '刷新文件': {'zh-Hant': '重新整理檔案', 'ja': 'ファイルを更新', 'en': 'Refresh Files'},
+    '综合设置': {'zh-Hant': '綜合設定', 'ja': '設定', 'en': 'Settings'},
+    '常用操作': {'zh-Hant': '常用操作', 'ja': 'よく使う操作', 'en': 'Common Actions'},
+    '选择文件或文件夹，再选择目标目录': {
+      'zh-Hant': '選擇檔案或資料夾，再選擇目標目錄',
+      'ja': 'ファイルまたはフォルダを選び、移動先を選択します',
+      'en': 'Choose a file or folder, then choose its destination',
+    },
+    '当前目录没有可移动的内容': {
+      'zh-Hant': '目前目錄沒有可移動的內容',
+      'ja': 'このフォルダに移動できる項目はありません',
+      'en': 'There is nothing to move in this folder',
+    },
+    '正在加载偏好与课程索引。': {
+      'zh-Hant': '正在載入偏好設定與課程索引。',
+      'ja': '設定とコースインデックスを読み込んでいます。',
+      'en': 'Loading preferences and the course index.',
+    },
+    '请选择要导入的文件': {
+      'zh-Hant': '請選擇要匯入的檔案',
+      'ja': '読み込むファイルを選択してください',
+      'en': 'Choose files to import',
+    },
+    '等待选择或准备文件…': {
+      'zh-Hant': '正在等待選擇或準備檔案…',
+      'ja': '選択またはファイルの準備を待っています…',
+      'en': 'Waiting for a selection or preparing files…',
+    },
+    '取消导入': {'zh-Hant': '取消匯入', 'ja': '読み込みをキャンセル', 'en': 'Cancel Import'},
+    '课程导入进度': {'zh-Hant': '課程匯入進度', 'ja': 'コース読み込みの進行状況', 'en': 'Course import progress'},
+    '当前课程播放进度': {'zh-Hant': '目前課程播放進度', 'ja': '現在のレッスンの再生位置', 'en': 'Current lesson playback progress'},
+    '正在加载': {'zh-Hant': '正在載入', 'ja': '読み込み中', 'en': 'Loading'},
+    '正在播放': {'zh-Hant': '正在播放', 'ja': '再生中', 'en': 'Playing'},
+    '已播': {'zh-Hant': '已播放', 'ja': '再生済み', 'en': 'Played'},
+    '已收藏': {'zh-Hant': '已收藏', 'ja': 'お気に入り', 'en': 'Favorited'},
+    '锁屏或切换应用时继续播放音频；不会自动进入画中画': {
+      'zh-Hant': '鎖定畫面或切換 App 時繼續播放音訊；不會自動進入子母畫面',
+      'ja': '画面ロック中やアプリ切替後も音声を再生します。ピクチャ・イン・ピクチャは自動で開始しません',
+      'en': 'Continue audio when the screen is locked or the app is in the background; Picture in Picture does not start automatically',
+    },
+    '通过 App Store 自愿支持，不解锁任何功能': {
+      'zh-Hant': '透過 App Store 自願支持，不會解鎖任何功能',
+      'ja': 'App Store を通じて自発的に開発者を支援します。機能は解放されません',
+      'en': 'Support the developer voluntarily through the App Store; no features are unlocked',
+    },
+    '视频': {'zh-Hant': '影片', 'ja': '動画', 'en': 'Video'},
+    '音频': {'zh-Hant': '音訊', 'ja': '音声', 'en': 'Audio'},
+    '字幕': {'zh-Hant': '字幕', 'ja': '字幕', 'en': 'Subtitle'},
+    '文件夹': {'zh-Hant': '資料夾', 'ja': 'フォルダ', 'en': 'Folder'},
+    '文件': {'zh-Hant': '檔案', 'ja': 'ファイル', 'en': 'File'},
+    ' 分钟': {'zh-Hant': ' 分鐘', 'ja': ' 分', 'en': ' minutes'},
+    'Copyright © 2026 李连顺. All rights reserved.\n第三方组件适用各自许可证；用户支持 QQ 群：1126527885': {
+      'zh-Hant': 'Copyright © 2026 李連順. All rights reserved.\n第三方元件適用各自授權；使用者支援 QQ 群：1126527885',
+      'ja': 'Copyright © 2026 李連順. All rights reserved.\n第三者コンポーネントには各ライセンスが適用されます。ユーザーサポート QQ グループ：1126527885',
+      'en': 'Copyright © 2026 Lianshun Li. All rights reserved.\nThird-party components are governed by their respective licenses. User support QQ group: 1126527885',
+    },
+    '路径：{path}\n类型：{type}\n大小：{size}\n修改时间：{modified}': {
+      'zh-Hant': '路徑：{path}\n類型：{type}\n大小：{size}\n修改時間：{modified}',
+      'ja': 'パス：{path}\n種類：{type}\nサイズ：{size}\n更新日時：{modified}',
+      'en': 'Path: {path}\nType: {type}\nSize: {size}\nModified: {modified}',
+    },
+    '{name}\n相关播放队列会停止。可在设置中恢复。': {
+      'zh-Hant': '{name}\n相關播放佇列會停止。可在設定中還原。',
+      'ja': '{name}\n関連する再生キューは停止します。設定から復元できます。',
+      'en': '{name}\nRelated playback queues will stop. You can restore it from Settings.',
+    },
+    '请输入 1～300 之间的整数秒数': {
+      'zh-Hant': '請輸入 1～300 之間的整數秒數',
+      'ja': '1～300 の整数秒を入力してください',
+      'en': 'Enter a whole number from 1 to 300 seconds',
+    },
+    '{seconds} 秒': {'zh-Hant': '{seconds} 秒', 'ja': '{seconds} 秒', 'en': '{seconds} sec'},
+    '{title}正在保存': {
+      'zh-Hant': '正在儲存{title}',
+      'ja': '{title}を保存中',
+      'en': 'Saving {title}',
+    },
+    '{label}外观': {'zh-Hant': '{label}外觀', 'ja': '{label}外観', 'en': '{label} appearance'},
+    '正在保存外观…': {'zh-Hant': '正在儲存外觀…', 'ja': '外観を保存中…', 'en': 'Saving appearance…'},
+    '{status} {position} / {duration}': {
+      'zh-Hant': '{status} {position} / {duration}',
+      'ja': '{status} {position} / {duration}',
+      'en': '{status} {position} / {duration}',
+    },
+    '{name} · 更多操作': {
+      'zh-Hant': '{name} · 更多操作',
+      'ja': '{name} ・その他の操作',
+      'en': '{name} · More actions',
+    },
+    '{count} 项 · 文件夹': {
+      'zh-Hant': '{count} 項 · 資料夾',
+      'ja': '{count} 項目 ・フォルダ',
+      'en': 'Folder · Items: {count}',
+    },
+    '已播 {time}': {'zh-Hant': '已播放 {time}', 'ja': '{time} まで再生', 'en': 'Played to {time}'},
+    '{count} 项': {'zh-Hant': '{count} 項', 'ja': '{count} 項目', 'en': 'Items: {count}'},
+    '{minutes} 分钟': {'zh-Hant': '{minutes} 分鐘', 'ja': '{minutes} 分', 'en': '{minutes} min'},
+    '{hours} 小时': {'zh-Hant': '{hours} 小時', 'ja': '{hours} 時間', 'en': '{hours} hr'},
+    '{hours} 小时 {minutes} 分钟': {
+      'zh-Hant': '{hours} 小時 {minutes} 分鐘',
+      'ja': '{hours} 時間 {minutes} 分',
+      'en': '{hours} hr {minutes} min',
+    },
+    '当前剩余 {time}，可重新设置或关闭': {
+      'zh-Hant': '目前剩餘 {time}，可重新設定或關閉',
+      'ja': '残り {time}です。再設定または停止できます',
+      'en': '{time} remaining; you can reset or stop the timer',
+    },
+    '自定义分钟数': {'zh-Hant': '自訂分鐘數', 'ja': '分数を入力', 'en': 'Custom Minutes'},
+    '关闭当前定时': {'zh-Hant': '關閉目前定時', 'ja': '現在のタイマーを停止', 'en': 'Stop Current Timer'},
+    '后退至 {time}': {'zh-Hant': '後退至 {time}', 'ja': '{time} まで巻き戻し', 'en': 'Rewound to {time}'},
+    '前进至 {time}': {'zh-Hant': '前進至 {time}', 'ja': '{time} まで早送り', 'en': 'Forwarded to {time}'},
+    '屏幕亮度 {percent}%': {'zh-Hant': '螢幕亮度 {percent}%', 'ja': '画面の明るさ {percent}%', 'en': 'Screen brightness {percent}%'},
+    '播放音量 {percent}%': {'zh-Hant': '播放音量 {percent}%', 'ja': '再生音量 {percent}%', 'en': 'Playback volume {percent}%'},
+    '无法切换屏幕方向': {'zh-Hant': '無法切換螢幕方向', 'ja': '画面の向きを変更できません', 'en': 'Unable to rotate the screen'},
+    '{count} 个媒体 · 按课程顺序播放': {
+      'zh-Hant': '{count} 個媒體 · 依課程順序播放',
+      'ja': '{count} 件 ・コース順に再生',
+      'en': 'Media: {count} · Course order',
+    },
+    '上次播至 {time}': {'zh-Hant': '上次播放至 {time}', 'ja': '前回の位置 {time}', 'en': 'Last played at {time}'},
+    '尚未记录进度': {'zh-Hant': '尚未記錄進度', 'ja': '再生位置なし', 'en': 'No saved position'},
+    '减速 0.05 倍': {'zh-Hant': '減速 0.05 倍', 'ja': '0.05 倍減速', 'en': 'Decrease speed by 0.05×'},
+    '加速 0.05 倍': {'zh-Hant': '加速 0.05 倍', 'ja': '0.05 倍加速', 'en': 'Increase speed by 0.05×'},
+    '播放模式 · 选择后开启连续播放': {
+      'zh-Hant': '播放模式 · 選擇後開啟連續播放',
+      'ja': '再生モード ・選択すると連続再生が有効になります',
+      'en': 'Playback Mode · Selecting one enables continuous playback',
+    },
+    '关闭播放信息': {'zh-Hant': '關閉播放資訊', 'ja': '再生情報を閉じる', 'en': 'Close playback information'},
+    '选择内嵌音轨': {'zh-Hant': '選擇內嵌音軌', 'ja': '埋め込み音声トラックを選択', 'en': 'Choose Embedded Audio'},
+    '选择内嵌字幕 / 关闭字幕': {
+      'zh-Hant': '選擇內嵌字幕 / 關閉字幕',
+      'ja': '埋め込み字幕を選択／字幕をオフ',
+      'en': 'Choose Embedded Subtitles / Turn Off',
+    },
+    '选择已导入的外置字幕': {
+      'zh-Hant': '選擇已匯入的外掛字幕',
+      'ja': '読み込み済みの外部字幕を選択',
+      'en': 'Choose Imported External Subtitles',
+    },
+    '外置字幕': {'zh-Hant': '外掛字幕', 'ja': '外部字幕', 'en': 'External Subtitles'},
+    '外置字幕 · 画中画内不显示': {
+      'zh-Hant': '外掛字幕 · 子母畫面內不顯示',
+      'ja': '外部字幕 ・ピクチャ・イン・ピクチャでは非表示',
+      'en': 'External Subtitles · Hidden in Picture in Picture',
+    },
+    '音轨 · {count} 条': {'zh-Hant': '音軌 · {count} 條', 'ja': '音声トラック ・{count} 件', 'en': 'Audio Tracks · {count}'},
+    '字幕 · {count} 条': {'zh-Hant': '字幕 · {count} 條', 'ja': '字幕 ・{count} 件', 'en': 'Subtitles · {count}'},
+    '列表随播放状态更新': {'zh-Hant': '列表會隨播放狀態更新', 'ja': 'リストは再生状態に合わせて更新されます', 'en': 'The list updates with playback state'},
+    '收藏当前媒体': {'zh-Hant': '收藏目前媒體', 'ja': '現在のメディアをお気に入りに追加', 'en': 'Favorite Current Media'},
+    '循环模式': {'zh-Hant': '循環模式', 'ja': 'リピートモード', 'en': 'Repeat Mode'},
+    '定时停止 · {time}': {'zh-Hant': '定時停止 · {time}', 'ja': 'スリープタイマー ・{time}', 'en': 'Sleep Timer · {time}'},
+    '音轨与字幕 · 包含外置字幕': {
+      'zh-Hant': '音軌與字幕 · 包含外掛字幕',
+      'ja': '音声と字幕 ・外部字幕を含む',
+      'en': 'Audio & Subtitles · Includes External Subtitles',
+    },
+    '播完当前停止': {'zh-Hant': '播完目前後停止', 'ja': '現在の項目の終了後に停止', 'en': 'Stop After Current'},
+    '{current} / {total} · {mode}': {'zh-Hant': '{current} / {total} · {mode}', 'ja': '{current} / {total} ・{mode}', 'en': '{current} / {total} · {mode}'},
+    '已跳过片头 {time} · 可拖回开头查看': {
+      'zh-Hant': '已跳過片頭 {time} · 可拖回開頭查看',
+      'ja': '冒頭 {time} をスキップしました ・先頭に戻して確認できます',
+      'en': 'Skipped {time} of the intro · Seek to the beginning to view it',
+    },
+    '字幕：{name}': {'zh-Hant': '字幕：{name}', 'ja': '字幕：{name}', 'en': 'Subtitle: {name}'},
+    '当前位置 {time}': {'zh-Hant': '目前位置 {time}', 'ja': '現在位置 {time}', 'en': 'Current Position {time}'},
+    '设置 A 点': {'zh-Hant': '設定 A 點', 'ja': 'A 点を設定', 'en': 'Set Point A'},
+    '设置 B 点': {'zh-Hant': '設定 B 點', 'ja': 'B 点を設定', 'en': 'Set Point B'},
+    'A 点 · {time}': {'zh-Hant': 'A 點 · {time}', 'ja': 'A 点 ・{time}', 'en': 'Point A · {time}'},
+    'B 点 · {time}': {'zh-Hant': 'B 點 · {time}', 'ja': 'B 点 ・{time}', 'en': 'Point B · {time}'},
+    '清除复读区间': {'zh-Hant': '清除重複區間', 'ja': 'リピート範囲を消去', 'en': 'Clear Repeat Range'},
+    '后退 {seconds} 秒': {'zh-Hant': '後退 {seconds} 秒', 'ja': '{seconds} 秒巻き戻し', 'en': 'Rewind {seconds} sec'},
+    '前进 {seconds} 秒': {'zh-Hant': '前進 {seconds} 秒', 'ja': '{seconds} 秒早送り', 'en': 'Forward {seconds} sec'},
+    '更多播放选项': {'zh-Hant': '更多播放選項', 'ja': 'その他の再生オプション', 'en': 'More Playback Options'},
+    'A–B 复读中': {'zh-Hant': 'A–B 重複中', 'ja': 'A–B リピート中', 'en': 'A–B Repeat Active'},
+    '已设 A 点': {'zh-Hant': '已設 A 點', 'ja': 'A 点設定済み', 'en': 'Point A Set'},
+    '第 {current} / {total} 节': {'zh-Hant': '第 {current} / {total} 節', 'ja': '{current} / {total} レッスン', 'en': 'Lesson {current} of {total}'},
+    '定位失败，请重试': {'zh-Hant': '定位失敗，請再試一次', 'ja': 'シークできませんでした。再試行してください', 'en': 'Seek failed. Try again.'},
+    '感谢你的「{support}」！': {
+      'zh-Hant': '感謝你的「{support}」！',
+      'ja': '「{support}」のご支援ありがとうございます！',
+      'en': 'Thank you for your {support}!',
+    },
+    '感谢你的支持。': {'zh-Hant': '感謝你的支持。', 'ja': 'ご支援ありがとうございます。', 'en': 'Thank you for your support.'},
+    '{name}，{price}': {'zh-Hant': '{name}，{price}', 'ja': '{name}、{price}', 'en': '{name}, {price}'},
   };
 
   static const _en = <(String, String)>[
@@ -1522,6 +1723,7 @@ class LText extends StatelessWidget {
     this.textWidthBasis,
     this.textHeightBehavior,
     this.selectionColor,
+    this.args = const <String, Object?>{},
   });
   final String data;
   final TextStyle? style;
@@ -1535,9 +1737,10 @@ class LText extends StatelessWidget {
   final TextWidthBasis? textWidthBasis;
   final TextHeightBehavior? textHeightBehavior;
   final Color? selectionColor;
+  final Map<String, Object?> args;
   @override
   Widget build(BuildContext context) => Text(
-    AppLocalizations.of(context).text(data),
+    AppLocalizations.of(context).text(data, args: args),
     style: style,
     textAlign: textAlign,
     textDirection: textDirection,
@@ -1555,13 +1758,20 @@ class LText extends StatelessWidget {
 }
 
 class LSelectableText extends StatelessWidget {
-  const LSelectableText(this.data, {super.key, this.style, this.textAlign});
+  const LSelectableText(
+    this.data, {
+    super.key,
+    this.style,
+    this.textAlign,
+    this.args = const <String, Object?>{},
+  });
   final String data;
   final TextStyle? style;
   final TextAlign? textAlign;
+  final Map<String, Object?> args;
   @override
   Widget build(BuildContext context) => SelectableText(
-    AppLocalizations.of(context).text(data),
+    AppLocalizations.of(context).text(data, args: args),
     style: style,
     textAlign: textAlign,
   );

@@ -385,11 +385,16 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     return result;
   }
 
-  Future<bool> confirm(String title, String body) async =>
+  Future<bool> confirm(
+    String title,
+    String body, {
+    Map<String, Object?> bodyArgs = const <String, Object?>{},
+  }) async =>
       await showLeiDialog<bool>(
         context: context,
         title: title,
         message: body,
+        messageArgs: bodyArgs,
         actions: [
           GlassDialogAction(
             label: '取消',
@@ -479,11 +484,27 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     final modifiedLabel =
         '${material.formatFullDate(modified)} '
         '${material.formatTimeOfDay(TimeOfDay.fromDateTime(modified))}';
+    final typeLabel = AppLocalizations.of(context).text(
+      switch (e.kind) {
+        'folder' => '文件夹',
+        'video' => '视频',
+        'audio' => '音频',
+        'subtitle' => '字幕',
+        _ => '文件',
+      },
+    );
     await showLeiDialog<void>(
       context: context,
       title: e.name,
+      localizeTitle: false,
       content: LSelectableText(
-        '路径：${e.path}\n类型：${e.kind}\n大小：${sizeLabel(e.size)}\n修改时间：$modifiedLabel',
+        '路径：{path}\n类型：{type}\n大小：{size}\n修改时间：{modified}',
+        args: {
+          'path': e.path,
+          'type': typeLabel,
+          'size': sizeLabel(e.size),
+          'modified': modifiedLabel,
+        },
       ),
       actions: [
         GlassDialogAction(
@@ -541,7 +562,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                   for (final f in folders)
                     LeiGlassTile(
                       leading: const LeiMediaIcon(icon: Icons.folder_outlined),
-                      title: LText(f.path),
+                      title: Text(f.path),
                       onTap: () => Navigator.pop(context, f.path),
                     ),
                 ],
@@ -558,7 +579,11 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         }
         break;
       case 'trash':
-        if (await confirm('移入回收站？', '${e.name}\n相关播放队列会停止。可在设置中恢复。')) {
+        if (await confirm(
+          '移入回收站？',
+          '{name}\n相关播放队列会停止。可在设置中恢复。',
+          bodyArgs: {'name': e.name},
+        )) {
           await m.command('trash', args: {'path': e.path});
           await m.refresh();
         }
@@ -593,9 +618,9 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                 ),
               for (final item in items)
                 LeiGlassTile(
-                  title: LText(
-                    item['recoverable'] == false ? '异常回收项目' : '${item['path']}',
-                  ),
+                  title: item['recoverable'] == false
+                      ? const LText('异常回收项目')
+                      : Text('${item['path']}'),
                   subtitle: item['recoverable'] == false
                       ? const LText('原路径或文件信息已损坏，可通过清空回收站删除')
                       : null,
@@ -727,7 +752,8 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           : LeiMediaIcon(icon: icon),
       title: LText(title),
       subtitle: LText(
-        saving ? '正在保存…' : '$seconds 秒',
+        saving ? '正在保存…' : '{seconds} 秒',
+        args: {'seconds': seconds},
         style: Theme.of(context).textTheme.bodySmall,
       ),
       trailing: saving
@@ -935,7 +961,10 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       onTap: saving ? null : () => savePreference(key, m.state[key] == false),
       trailing: saving
           ? Semantics(
-              label: '$title正在保存',
+              label: AppLocalizations.of(context).text(
+                '{title}正在保存',
+                args: {'title': AppLocalizations.of(context).text(title)},
+              ),
               child: const SizedBox(
                 width: 52,
                 child: Center(child: GlassProgressIndicator.circular(size: 22)),
@@ -987,9 +1016,15 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     return Semantics(
       selected: selected,
       button: true,
-      label: '$label外观',
+      label: AppLocalizations.of(context).text(
+        '{label}外观',
+        args: {'label': AppLocalizations.of(context).text(label)},
+      ),
       child: GlassButton.custom(
-        label: AppLocalizations.of(context).text('$label外观'),
+        label: AppLocalizations.of(context).text(
+          '{label}外观',
+          args: {'label': AppLocalizations.of(context).text(label)},
+        ),
         enabled: !savingAppearance,
         shape: leiRoundedControlShape,
         onTap: () => saveAppearance(key),
@@ -1322,7 +1357,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                           const LeiGlassTile(title: LText('当前目录没有可移动的内容')),
                         for (final e in candidates)
                           LeiGlassTile(
-                            title: LText(e.name),
+                            title: Text(e.name),
                             leading: LeiMediaIcon(
                               icon: e.isFolder
                                   ? Icons.folder_outlined
@@ -1368,13 +1403,14 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   );
 
   List<Widget> commonMenuItems() {
+    final localizations = AppLocalizations.of(context);
     const layouts = {
       'list': ('列表', Icons.view_list_rounded),
       'grid': ('网格', Icons.grid_view_rounded),
     };
     const sorts = {'name': '名称', 'type': '类型', 'size': '大小', 'date': '日期'};
     Widget actionItem(String title, String value) => GlassMenuItem(
-      title: title,
+      title: localizations.text(title),
       height: 48,
       onTap: () => commonAction(value),
     );
@@ -1387,7 +1423,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       ],
       for (final option in layouts.entries)
         GlassMenuItem(
-          title: option.value.$1,
+          title: localizations.text(option.value.$1),
           height: 48,
           icon: menuCheck(m.libraryLayout == option.key),
           trailing: Icon(option.value.$2),
@@ -1396,7 +1432,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       const GlassMenuDivider(),
       for (final option in sorts.entries)
         GlassMenuItem(
-          title: option.value,
+          title: localizations.text(option.value),
           height: 48,
           icon: menuCheck(m.librarySort == option.key),
           trailing: m.librarySort == option.key
@@ -1471,14 +1507,17 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          LText(
-                            entry.parent.isEmpty
-                                ? '当前课程'
-                                : entry.parent.split('/').last,
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
+                          entry.parent.isEmpty
+                              ? LText(
+                                  '当前课程',
+                                  style: Theme.of(context).textTheme.bodySmall,
+                                )
+                              : Text(
+                                  entry.parent.split('/').last,
+                                  style: Theme.of(context).textTheme.bodySmall,
+                                ),
                           const SizedBox(height: 6),
-                          LText(
+                          Text(
                             entry.name,
                             maxLines: 3,
                             overflow: TextOverflow.ellipsis,
@@ -1491,12 +1530,18 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                 ),
                 const SizedBox(height: 18),
                 LText(
-                  '${current && m.loading
-                      ? '正在加载'
-                      : current && m.playing
-                      ? '正在播放'
-                      : '已播'} '
-                  '${timeLabel(position)} / ${timeLabel(duration)}',
+                  '{status} {position} / {duration}',
+                  args: {
+                    'status': AppLocalizations.of(context).text(
+                      current && m.loading
+                          ? '正在加载'
+                          : current && m.playing
+                          ? '正在播放'
+                          : '已播',
+                    ),
+                    'position': timeLabel(position),
+                    'duration': timeLabel(duration),
+                  },
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
                 const SizedBox(height: 10),
@@ -1650,7 +1695,8 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
 
   Widget entryMenu(MediaEntry entry, Map<String, dynamic> record) =>
       LeiGlassMenu(
-        tooltip: '${entry.name} · 更多操作',
+        tooltip: '{name} · 更多操作',
+        tooltipArgs: {'name': entry.name},
         onSelected: (value) => action(entry, value),
         choices: {
           if (entry.isPlayable)
@@ -1664,16 +1710,29 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       );
 
   Widget fileRow(MediaEntry e) {
+    final localizations = AppLocalizations.of(context);
     final r = m.record(e.path);
     final position = (r['position'] as num?)?.toDouble() ?? 0;
     final duration = (r['duration'] as num?)?.toDouble() ?? 0;
+    final details = e.isFolder
+        ? localizations.text('{count} 项 · 文件夹', args: {
+            'count': folderCount(e.path),
+          })
+        : <String>[
+            sizeLabel(e.size),
+            if (e.isPlayable && position > 0)
+              localizations.text('已播 {time}', args: {
+                'time': timeLabel(position),
+              }),
+            if (r['favorite'] == true) localizations.text('已收藏'),
+          ].join(' · ');
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       child: LeiGlassTile(
         leading: MediaQuery.textScalerOf(context).scale(14) > 20
             ? null
             : LeiMediaIcon(icon: entryIcon(e)),
-        title: LText(
+        title: Text(
           e.name,
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
@@ -1683,16 +1742,12 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const SizedBox(height: 4),
-            LText(
-              e.isFolder
-                  ? '${folderCount(e.path)} 项 · 文件夹'
-                  : '${sizeLabel(e.size)}'
-                        '${e.isPlayable && position > 0 ? ' · 已播 ${timeLabel(position)}' : ''}'
-                        '${r['favorite'] == true ? ' · 已收藏' : ''}',
+            Text(
+              details,
               style: Theme.of(context).textTheme.bodySmall,
             ),
             if (tab != 0 && e.parent.isNotEmpty)
-              LText(
+              Text(
                 e.parent,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -1739,7 +1794,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                     children: [
                       LeiMediaIcon(icon: entryIcon(entry)),
                       const SizedBox(height: 14),
-                      LText(
+                      Text(
                         entry.name,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
@@ -1749,7 +1804,8 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                       if (entry.isFolder) ...[
                         const SizedBox(height: 6),
                         LText(
-                          '${folderCount(entry.path)} 项',
+                          '{count} 项',
+                          args: {'count': folderCount(entry.path)},
                           style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ],
