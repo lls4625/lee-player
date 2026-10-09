@@ -204,6 +204,7 @@ final class DeveloperTipPurchase {
   private var storage = "initializing"
   private var lastStorageDiagnostic: String?
   private var catalogError: String?
+  private var catalogGeneration = 0
   private var verificationPending = false
   private var operationInProgress = false
   private var page: String?
@@ -386,13 +387,21 @@ final class DeveloperTipPurchase {
           "animated": entry.page != nil && entry.page == currentToken
             && consumerPage != nil && consumerPage == currentPage])
       case "loadProducts":
+        catalogGeneration += 1
+        let generation = catalogGeneration
         do {
           let listed = try await Product.products(for: Self.ids)
+          // StoreKit may complete an earlier, timed-out query after a retry.
+          // Only the newest request can replace or publish the catalog.
+          guard generation == catalogGeneration else { result(snapshot()); return }
           products = Dictionary(uniqueKeysWithValues: listed.filter {
             Self.ids.contains($0.id) && $0.type == .consumable
           }.map { ($0.id, $0) })
           catalogError = products.isEmpty ? "purchase_products_unavailable" : nil
-        } catch { catalogError = "purchase_products_load_failed" }
+        } catch {
+          guard generation == catalogGeneration else { result(snapshot()); return }
+          catalogError = "purchase_products_load_failed"
+        }
         publish()
         result(snapshot())
       case "purchase":

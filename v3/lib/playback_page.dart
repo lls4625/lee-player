@@ -532,27 +532,36 @@ class _PlaybackPageState extends State<PlaybackPage> {
     Map<T, String> choices, {
     T? selected,
     bool localizeChoices = true,
+    Object? mediaGeneration,
   }) {
     final entries = choices.entries.toList();
+    bool sameMedia() => mediaGeneration == null ||
+        m.state['generation'] == mediaGeneration;
     return showLeiSheet<T>(context: context, platformViewBackdrop: true,
-      builder: (context) => SafeArea(child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * .7,
-        child: Column(children: [
-          LeiSheetHeading(title: title, platformViewBackdrop: true),
-          Expanded(child: ListView.builder(itemCount: entries.length, itemBuilder: (context, index) {
-            final choice = entries[index];
-            final style = choice.key == selected
-                ? TextStyle(color: leiAccent(context), fontWeight: FontWeight.w600)
-                : null;
-            return LeiGlassTile(
-              title: localizeChoices
-                  ? LText(choice.value, style: style)
-                  : Text(choice.value, style: style),
-              trailing: choice.key == selected ? const LeiMediaIcon(icon: Icons.check) : null,
-              onTap: () => Navigator.pop(context, choice.key));
-          })),
-        ]),
-      )),
+      builder: (context) => AnimatedBuilder(animation: m,
+        builder: (context, _) => SafeArea(child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * .7,
+          child: Column(children: [
+            LeiSheetHeading(title: title, platformViewBackdrop: true,
+              subtitle: sameMedia() ? null : '媒体已变化，请关闭后重新选择'),
+            Expanded(child: ListView.builder(itemCount: sameMedia() ? entries.length : 0,
+              itemBuilder: (context, index) {
+                final choice = entries[index];
+                final style = choice.key == selected
+                    ? TextStyle(color: leiAccent(context), fontWeight: FontWeight.w600)
+                    : null;
+                return LeiGlassTile(
+                  title: localizeChoices
+                      ? LText(choice.value, style: style)
+                      : Text(choice.value, style: style),
+                  trailing: choice.key == selected ? const LeiMediaIcon(icon: Icons.check) : null,
+                  onTap: () {
+                    if (sameMedia()) Navigator.pop(context, choice.key);
+                  });
+              })),
+          ]),
+        )),
+      ),
     );
   }
   Future<void> queue() async {
@@ -667,14 +676,14 @@ class _PlaybackPageState extends State<PlaybackPage> {
     );
     if (value != null) await m.configure({'sleepMinutes': value});
   }
-  Future<void> playbackInfo() async {
+  Future<void> playbackInfo(BuildContext context) async {
     Map<String, dynamic>? info;
     String? legacyText;
     if (!await m.command('playbackInfo', onValue: (value) {
       if (value is Map) info = Map<String, dynamic>.from(value);
       if (value is String) legacyText = value;
     }) ||
-        !mounted ||
+        !context.mounted ||
         (info == null && legacyText == null)) return;
     final localizations = AppLocalizations.of(context);
     final text = info == null
@@ -706,8 +715,12 @@ class _PlaybackPageState extends State<PlaybackPage> {
       ]);
   }
   Future<void> tracks() async {
-    final kind = await choose<String>('音轨与字幕', {'audio': '选择内嵌音轨', 'subtitle': '选择内嵌字幕 / 关闭字幕', 'external': '选择已导入的外置字幕'});
-    if (!mounted || kind == null) return;
+    final generation = m.state['generation'];
+    if (generation == null) return;
+    final kind = await choose<String>('音轨与字幕',
+      {'audio': '选择内嵌音轨', 'subtitle': '选择内嵌字幕 / 关闭字幕', 'external': '选择已导入的外置字幕'},
+      mediaGeneration: generation);
+    if (!mounted || kind == null || m.state['generation'] != generation) return;
     if (kind == 'external') {
       final subtitles = m.entries.where((e) => e.kind == 'subtitle').toList()..sort((a, b) => naturalCompare(a.path, b.path));
       if (subtitles.isEmpty) { showLeiToast(context, '请先回课程库，通过 + 导入字幕文件'); return; }
@@ -717,8 +730,10 @@ class _PlaybackPageState extends State<PlaybackPage> {
             : '外置字幕 · 画中画内不显示',
         {for (final e in subtitles) e.path: e.path},
         localizeChoices: false,
+        mediaGeneration: generation,
       );
-      if (path != null) await m.command('subtitle', args: {'path': path});
+      if (!mounted || path == null || m.state['generation'] != generation) return;
+      await m.command('subtitle', args: {'path': path, 'generation': generation});
     } else {
       await chooseTrack(kind);
     }
@@ -778,7 +793,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
       ),
     );
   }
-  Future<void> moreOptions() async {
+  Future<void> moreOptions(BuildContext context) async {
     final localizations = AppLocalizations.of(context);
     final action = await choose<String>('播放选项', {
       'favorite': m.record(m.path)['favorite'] == true ? '取消收藏' : '收藏当前媒体',
@@ -798,7 +813,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
       'status': '当前播放状态',
       'info': '播放信息',
     });
-    if (!mounted || action == null) return;
+    if (!context.mounted || action == null) return;
     switch (action) {
       case 'favorite':
         final entry = m.entry(m.path);
@@ -848,7 +863,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
           actions: [GlassDialogAction(label: '关闭',
             onPressed: () => Navigator.of(context, rootNavigator: true).pop())]);
         break;
-      case 'info': await playbackInfo(); break;
+      case 'info': await playbackInfo(context); break;
     }
   }
 
@@ -951,7 +966,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
       playbackButton(LText(_playbackRateLabel(m.number('rate', 1))), '播放速度', speed),
       playbackButton(const Icon(Icons.repeat_rounded), 'A–B 片段复读', () => adjustmentSheet(true)),
       playbackButton(const Icon(Icons.subtitles_outlined), '音轨与字幕', tracks),
-      playbackButton(const Icon(Icons.more_horiz), '更多播放选项', moreOptions),
+      playbackButton(const Icon(Icons.more_horiz), '更多播放选项', () => moreOptions(context)),
     ];
     if (compact && constraints.maxWidth >= 560) {
       return Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -1000,7 +1015,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
                 onPressed: m.loading ? null : () => m.command('play')),
               LeiGlassButton(label: '返回课程库', icon: Icons.arrow_back,
                 onPressed: () => Navigator.of(context).pop()),
-              LeiGlassButton(label: '播放信息', icon: Icons.info_outline, onPressed: playbackInfo),
+              LeiGlassButton(label: '播放信息', icon: Icons.info_outline, onPressed: () => playbackInfo(context)),
             ]),
           ]))))));
 

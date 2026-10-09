@@ -12,7 +12,9 @@ API_AVAILABLE(ios(15.0))
 @property (nonatomic, copy, nullable) dispatch_block_t pauseRequested;
 @property (nonatomic, copy, nullable) dispatch_block_t startTimedOut;
 @property (nonatomic, copy, nullable) void (^diagnostic)(NSString *message);
-@property (nonatomic, copy, nullable) void (^seekRequested)(NSTimeInterval seconds);
+/// Resolve only after the seek settles (including rejection or cancellation).
+@property (nonatomic, copy, nullable) void (^seekRequested)(NSTimeInterval seconds,
+                                                           void (^completion)(BOOL finished));
 @property (nonatomic, copy, nullable) NSTimeInterval (^positionProvider)(void);
 @property (nonatomic, copy, nullable) NSTimeInterval (^durationProvider)(void);
 @property (nonatomic, copy, nullable) BOOL (^playingProvider)(void);

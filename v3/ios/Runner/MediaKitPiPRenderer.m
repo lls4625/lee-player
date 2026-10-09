@@ -27,10 +27,15 @@ static NSString *const LeeMediaKitPiPErrorDomain = @"lei.player.media-kit-pip";
 @property (atomic) int lastRenderError;
 @property (nonatomic) CFTimeInterval lastSubmission;
 @property (nonatomic) BOOL playbackWasPlaying;
+// Accessed on the main queue. Remove before calling out so late/duplicate
+// engine callbacks and stop/dealloc cannot complete a system request twice.
+@property (nonatomic, strong) NSMutableDictionary<NSUUID *, dispatch_block_t> *pendingSeeks;
 @property (nonatomic, readwrite) AVPictureInPictureController *controller;
 - (void)scheduleRender;
 - (void)renderFrame;
 - (void)startIfPossible;
+- (void)finishSeek:(NSUUID *)requestID success:(BOOL)success;
+- (void)synchronizePlaybackTimebase;
 @end
 
 @implementation MediaKitPiPRenderer
@@ -313,6 +318,10 @@ static void LeeMediaKitPiPUpdate(void *context) {
     self.stopping = YES;
     [self.startupTimer invalidate];
     self.startupTimer = nil;
+    for (NSUUID *requestID in self.pendingSeeks.allKeys) {
+        [self finishSeek:requestID success:NO];
+    }
+    self.seekRequested = nil;
     [self.controller stopPictureInPicture];
     if (self.renderContext) {
         mpv_render_context_set_update_callback(self.renderContext, NULL, NULL);
@@ -350,10 +359,61 @@ static void LeeMediaKitPiPUpdate(void *context) {
 - (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController
                     skipByInterval:(CMTime)skipInterval
                  completionHandler:(void (^)(void))completionHandler {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self pictureInPictureController:pictureInPictureController
+                skipByInterval:skipInterval completionHandler:completionHandler];
+        });
+        return;
+    }
     if (self.stopping) { completionHandler(); return; }
+    NSUUID *requestID = [NSUUID UUID];
+    if (!self.pendingSeeks) self.pendingSeeks = [NSMutableDictionary dictionary];
+    self.pendingSeeks[requestID] = [completionHandler copy];
     NSTimeInterval position = self.positionProvider ? self.positionProvider() : 0;
-    if (self.seekRequested) self.seekRequested(MAX(0, position + CMTimeGetSeconds(skipInterval)));
-    completionHandler();
+    NSTimeInterval target = position + CMTimeGetSeconds(skipInterval);
+    if (!self.seekRequested || !isfinite(target)) {
+        [self finishSeek:requestID success:NO];
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    self.seekRequested(MAX(0, target), ^(BOOL finished) {
+        // PlaybackService normally resolves on main. Keep the delegate safe if
+        // a transport resolves from another queue, including after teardown.
+        if ([NSThread isMainThread]) {
+            [weakSelf finishSeek:requestID success:finished];
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf finishSeek:requestID success:finished];
+            });
+        }
+    });
+}
+
+- (void)synchronizePlaybackTimebase {
+    CMTimebaseRef clock = self.displayLayer.controlTimebase;
+    if (clock) {
+        NSTimeInterval position = self.positionProvider ? self.positionProvider() : 0;
+        if (isfinite(position)) {
+            [self.displayLayer flush];
+            CMTimebaseSetTime(clock, CMTimeMakeWithSeconds(MAX(0, position), 600));
+        }
+        BOOL playing = !self.stopping && (self.playingProvider ? self.playingProvider() : NO);
+        double rate = self.rateProvider ? self.rateProvider() : 1;
+        CMTimebaseSetRate(clock, playing && isfinite(rate) ? rate : 0);
+    }
+    [self.controller invalidatePlaybackState];
+}
+
+- (void)finishSeek:(NSUUID *)requestID success:(BOOL)success {
+    dispatch_block_t completion = self.pendingSeeks[requestID];
+    if (!completion) return;
+    [self.pendingSeeks removeObjectForKey:requestID];
+    // Use the confirmed engine position, even on failure/cancellation. Never
+    // acknowledge the requested target before the engine has actually settled.
+    [self synchronizePlaybackTimebase];
+    if (!success && self.diagnostic) self.diagnostic(@"pip skip failed or cancelled");
+    completion();
 }
 
 - (BOOL)pictureInPictureControllerShouldProhibitBackgroundAudioPlayback:

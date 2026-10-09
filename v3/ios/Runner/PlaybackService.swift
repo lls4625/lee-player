@@ -441,7 +441,7 @@ final class PlaybackService: NSObject {
     assetPreparationTask?.cancel()
     sleepTimer?.invalidate()
     heartbeat?.invalidate()
-    openingTimeout?.cancel(); seekTimeout?.cancel()
+    openingTimeout?.cancel(); cancelSeeks()
     audioRecoveryWorkItem?.cancel()
     mediaKitPiPRestoreTimeout?.cancel()
     cancelPendingAVPlayerPiP()
@@ -1135,7 +1135,12 @@ final class PlaybackService: NSObject {
     if let value = savedBrightness { UIScreen.main.brightness = value; savedBrightness = nil }
   }
 
-  func requestSubtitle(path: String, completion: @escaping (String?) -> Void) {
+  func requestSubtitle(path: String, session: Int, completion: @escaping (String?) -> Void) {
+    // The file chooser belongs to the media session in which it was opened.
+    // Validate before reading the file or sending any command to either engine.
+    guard session == generation, timelineReady, !seekFault, currentPath != nil else {
+      completion("track_selection_stale"); return
+    }
     guard let engine = mediaKit else {
       do { try loadSubtitle(path: path); completion(nil) }
       catch { completion((error as? LibraryFailure)?.code ?? "subtitle_load_failed") }
@@ -1751,10 +1756,24 @@ final class PlaybackService: NSObject {
         self.mediaKitPiP = nil
         self.restoreMediaKitVideoOutput()
       }
-      renderer.seekRequested = { [weak self] seconds in self?.seek(seconds) }
+      let seekGeneration = generation
+      renderer.seekRequested = { [weak self, weak renderer, weak engine = mediaKit] seconds, completion in
+        guard let self, let renderer, let engine,
+          self.generation == seekGeneration, self.mediaKit === engine,
+          self.mediaKitPiP === renderer else { completion(false); return }
+        self.seek(seconds) { [weak self, weak renderer, weak engine] finished in
+          guard let self, let renderer, let engine,
+            self.generation == seekGeneration, self.mediaKit === engine,
+            self.mediaKitPiP === renderer else { completion(false); return }
+          completion(finished)
+        }
+      }
       renderer.positionProvider = { [weak self] in self?.position ?? 0 }
       renderer.durationProvider = { [weak self] in self?.duration ?? 0 }
-      renderer.playingProvider = { [weak self] in self?.enginePlaying ?? false }
+      renderer.playingProvider = { [weak self] in
+        guard let self else { return false }
+        return self.enginePlaying && !self.isSeeking
+      }
       renderer.rateProvider = { [weak self] in Double(self?.rate ?? 1) }
       mediaKitPiP = renderer
       mediaKitPiPActiveRequestID = requestID

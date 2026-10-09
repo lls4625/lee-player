@@ -43,11 +43,14 @@ struct LibraryScanSnapshot {
 /// value snapshot, so the playback thread never waits for a disk operation.
 final class LibraryRecordStore {
   typealias Records = [String: [String: Any]]
+  typealias TrashRecords = [String: Records]
   private let work = DispatchQueue(label: "雷player.records", qos: .utility)
   private let lock = NSLock()
   private let root: URL
   private let support: URL
   private var value: Records = [:]
+  private var trashRecords: TrashRecords = [:]
+  private var legacyTrashPending = false
   private var cached: Records = [:]
   private var issue: String? = "library_records_loading"
   private var cachedIssue: String? = "library_records_loading"
@@ -94,13 +97,15 @@ final class LibraryRecordStore {
     DispatchQueue.main.async { [weak self] in self?.changed?() }
   }
 
-  private func write(_ next: Records) throws {
+  private func write(_ next: Records, trash nextTrash: TrashRecords? = nil) throws {
+    let archived = nextTrash ?? trashRecords
     let data = try JSONSerialization.data(withJSONObject: [
-      "version": 1, "revision": revision + 1, "records": next,
+      "version": 2, "revision": revision + 1, "records": next, "trashRecords": archived,
+      "legacyTrashPending": legacyTrashPending,
     ])
     try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     revision += 1
-    value = next
+    value = next; trashRecords = archived
     issue = nil; failures = 0
   }
 
@@ -117,6 +122,10 @@ final class LibraryRecordStore {
       }
       return true
     }
+  }
+
+  private func validTrash(_ archived: TrashRecords) -> Bool {
+    archived.allSatisfy { token, records in UUID(uuidString: token) != nil && valid(records) }
   }
 
   private func load() {
@@ -140,28 +149,98 @@ final class LibraryRecordStore {
         preserve(data)
         throw LibraryFailure.app("library_records_corrupt")
       }
-      if let version = object["version"] as? Int {
-        guard version == 1 else { throw LibraryFailure.app("library_records_version") }
+      let version = object["version"] as? Int ?? 0
+      if object["version"] is Int {
+        guard version == 1 || version == 2 else { throw LibraryFailure.app("library_records_version") }
         guard let records = object["records"] as? Records, valid(records) else {
           preserve(data); throw LibraryFailure.app("library_records_corrupt")
         }
-        value = records; revision = object["revision"] as? Int ?? 0
+        var archived: TrashRecords = [:]
+        if version == 2 {
+          guard let stored = object["trashRecords"] as? TrashRecords, validTrash(stored) else {
+            preserve(data); throw LibraryFailure.app("library_records_corrupt")
+          }
+          archived = stored
+        }
+        value = records; trashRecords = archived; revision = object["revision"] as? Int ?? 0
       } else {
         guard let records = object as? Records, valid(records) else {
           preserve(data); throw LibraryFailure.app("library_records_corrupt")
         }
-        // Keep the exact legacy bytes before the first versioned commit.
+        value = records; trashRecords = [:]
+      }
+      if version < 2 {
+        // Preserve the exact original bytes, including histories whose token
+        // ownership was already ambiguous in the path-only storage format.
         let backup = support.appendingPathComponent("library-legacy-\(UUID().uuidString).json")
         try data.write(to: backup, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        try write(records)
       }
+      legacyTrashPending = version < 2 || object["legacyTrashPending"] as? Bool == true
       loaded = true; issue = nil
+      // Reconcile a v1 journal before assigning any legacy trash histories.
       try recoverJournal()
+      if legacyTrashPending { try migrateLegacyTrash() }
       publish()
     } catch {
       issue = (error as? LibraryFailure)?.code ?? "library_records_unavailable"
       publish()
     }
+  }
+
+  /// Old releases kept trashed histories at their live paths. Associate only
+  /// records with one possible token and no live file; never guess when the
+  /// old data cannot distinguish same-name live/recycled files.
+  private func migrateLegacyTrash() throws {
+    let fm = FileManager.default
+    let directory = support.appendingPathComponent("Trash")
+    var directoryFlag: ObjCBool = false
+    var candidates: [(token: String, path: String, content: URL)] = []
+    if fm.fileExists(atPath: directory.path, isDirectory: &directoryFlag) {
+      guard directoryFlag.boolValue,
+        try directory.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else {
+        throw LibraryFailure.app("library_records_unavailable")
+      }
+      for item in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey]) {
+        guard UUID(uuidString: item.lastPathComponent) != nil,
+          try item.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true,
+          let path = try? String(contentsOf: item.appendingPathComponent("original.txt"), encoding: .utf8),
+          valid([path: [:]]) else { continue }
+        let content = item.appendingPathComponent("content")
+        guard fm.fileExists(atPath: content.path) else { continue }
+        candidates.append((item.lastPathComponent, path, content))
+      }
+    }
+    var next = value
+    var archived = trashRecords
+    var hasAmbiguousRecords = false
+    for candidate in candidates where archived[candidate.token] == nil { archived[candidate.token] = [:] }
+    for (path, fields) in value {
+      let owners = candidates.filter { candidate in
+        guard path == candidate.path || path.hasPrefix(candidate.path + "/") else { return false }
+        let suffix = String(path.dropFirst(candidate.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let content = suffix.isEmpty ? candidate.content : candidate.content.appendingPathComponent(suffix)
+        return fm.fileExists(atPath: content.path)
+      }
+      guard !owners.isEmpty else { continue }
+      let liveExists = fm.fileExists(atPath: root.appendingPathComponent(path).path)
+      if owners.count == 1 && !liveExists { archived[owners[0].token, default: [:]][path] = fields }
+      else { hasAmbiguousRecords = true }
+      // A legacy live replacement may never have been played, or may have
+      // overwritten the recycled file's record. Both are indistinguishable.
+      // Preserve that record in the backup rather than guessing either owner.
+      next.removeValue(forKey: path)
+    }
+    if hasAmbiguousRecords {
+      // A recovered v1 journal may contain newer progress than the original
+      // library backup. Preserve this effective committed state too, before
+      // removing any ambiguous live-path association.
+      let backup = support.appendingPathComponent("library-legacy-ambiguous-\(UUID().uuidString).json")
+      try Data(contentsOf: file).write(to: backup,
+        options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+    legacyTrashPending = false
+    do { try write(next, trash: archived) }
+    catch { legacyTrashPending = true; throw error }
   }
 
   private func preserve(_ data: Data) {
@@ -175,7 +254,7 @@ final class LibraryRecordStore {
       guard Date().timeIntervalSince(self.lastRecoveryAttempt) >= 1 else { return }
       self.lastRecoveryAttempt = Date()
       guard !["library_records_corrupt", "library_records_version"].contains(self.issue ?? "") else { return }
-      if !self.loaded || FileManager.default.fileExists(atPath: self.journal.path) { self.load() }
+      if !self.loaded || self.legacyTrashPending || FileManager.default.fileExists(atPath: self.journal.path) { self.load() }
       else if self.issue != nil || !self.dirty.isEmpty { self.flush() }
     }
   }
@@ -184,7 +263,7 @@ final class LibraryRecordStore {
     guard loaded, issue == nil || issue == "library_records_unavailable" else {
       throw LibraryFailure.app(issue ?? "library_records_unavailable")
     }
-    guard !FileManager.default.fileExists(atPath: journal.path) else {
+    guard !legacyTrashPending, !FileManager.default.fileExists(atPath: journal.path) else {
       throw LibraryFailure.app("library_records_recovery")
     }
   }
@@ -244,13 +323,14 @@ final class LibraryRecordStore {
   /// Called only on the library worker, never the main thread. The journal is
   /// durable before the file step and blocks later writes until reconciled.
   func fileMutation(kind: String, source: URL, destination: URL?,
-                    change: (inout Records) -> Void) throws {
+                    change: (inout Records, inout TrashRecords) -> Void) throws {
     try work.sync {
       try requireWritable()
-      var next = merged(); change(&next)
-      let document: [String: Any] = ["version": 1, "operationId": UUID().uuidString,
+      var next = merged(); var nextTrash = trashRecords; change(&next, &nextTrash)
+      let document: [String: Any] = ["version": 2, "operationId": UUID().uuidString,
         "kind": kind, "source": try location(source),
-        "destination": try destination.map { try location($0) } ?? "", "records": next]
+        "destination": try destination.map { try location($0) } ?? "",
+        "records": next, "trashRecords": nextTrash]
       try JSONSerialization.data(withJSONObject: document).write(to: journal,
         options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
       publish(invalidate: true)
@@ -259,13 +339,13 @@ final class LibraryRecordStore {
         if let destination { try FileManager.default.moveItem(at: source, to: destination) }
         else { try FileManager.default.removeItem(at: source) }
         fileChanged = true
-        try write(next); dirty.removeAll()
+        try write(next, trash: nextTrash); dirty.removeAll()
         try FileManager.default.removeItem(at: journal)
         publish()
       } catch {
         // Reflect the actual file location in this session, without claiming a
         // durable record commit. The journal retains the recovery candidate.
-        if fileChanged { value = next; dirty.removeAll() }
+        if fileChanged { value = next; trashRecords = nextTrash; dirty.removeAll() }
         issue = "library_records_recovery"; publish()
         throw LibraryFailure.app("library_records_recovery", technicalDetail: error.localizedDescription)
       }
@@ -295,9 +375,17 @@ final class LibraryRecordStore {
     let fm = FileManager.default
     guard fm.fileExists(atPath: journal.path) else { return }
     guard let doc = try JSONSerialization.jsonObject(with: Data(contentsOf: journal)) as? [String: Any],
-      doc["version"] as? Int == 1, let kind = doc["kind"] as? String,
+      let version = doc["version"] as? Int, version == 1 || version == 2,
+      let kind = doc["kind"] as? String,
       let sourcePath = doc["source"] as? String, let destinationPath = doc["destination"] as? String,
       let next = doc["records"] as? Records, valid(next) else { throw LibraryFailure.app("library_records_recovery") }
+    let nextTrash: TrashRecords
+    if version == 2 {
+      guard let archived = doc["trashRecords"] as? TrashRecords, validTrash(archived) else {
+        throw LibraryFailure.app("library_records_recovery")
+      }
+      nextTrash = archived
+    } else { nextTrash = trashRecords }
     let source = try resolveLocation(sourcePath)
     let trash = support.appendingPathComponent("Trash").path + "/"
     func allowed(_ url: URL) -> Bool { url.path.hasPrefix(root.path + "/") || url.path.hasPrefix(trash) }
@@ -306,17 +394,92 @@ final class LibraryRecordStore {
       let destination = try resolveLocation(destinationPath)
       guard allowed(destination) else { throw LibraryFailure.app("library_records_recovery") }
       let fromExists = fm.fileExists(atPath: source.path), toExists = fm.fileExists(atPath: destination.path)
-      if !fromExists && toExists { try write(next); dirty.removeAll() }
+      if !fromExists && toExists { try write(next, trash: nextTrash); dirty.removeAll() }
       else if !(fromExists && !toExists) { throw LibraryFailure.app("library_records_recovery") }
       // Source only: the file step never completed; retain the committed records.
     } else if kind == "purge", source.path.hasPrefix(trash) {
       // This token was explicitly selected for permanent removal. Resume a
       // partial removal before committing its record deletion.
       if fm.fileExists(atPath: source.path) { try fm.removeItem(at: source) }
-      try write(next); dirty.removeAll()
+      try write(next, trash: nextTrash); dirty.removeAll()
     } else { throw LibraryFailure.app("library_records_recovery") }
     try fm.removeItem(at: journal)
     issue = nil; publish(invalidate: true)
+  }
+}
+
+/// One registry for the whole process, including quarantined provider tasks.
+/// Registration, cleanup and release share one queue, so startup recovery from
+/// another CourseLibrary instance cannot remove a still-running import.
+final class ImportStagingStore {
+  static let shared = ImportStagingStore()
+  private let work = DispatchQueue(label: "雷player.import-staging", qos: .utility)
+  private let fm = FileManager.default
+  private let removeItem: (URL) throws -> Void
+  private var active: Set<String> = []
+
+  init(removeItem: @escaping (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }) {
+    self.removeItem = removeItem
+  }
+
+  func recover(in support: URL) {
+    // Large interrupted copies should not delay application startup on main.
+    work.async { _ = self.removeAbandoned(in: support) }
+  }
+
+  /// A synchronous barrier also lets the next import retry a failed cleanup.
+  @discardableResult
+  func recoverSynchronously(in support: URL) -> [URL] {
+    work.sync { removeAbandoned(in: support) }
+  }
+
+  func begin(in support: URL) throws -> URL {
+    try work.sync {
+      _ = removeAbandoned(in: support)
+      let staging = support.standardizedFileURL.resolvingSymlinksInPath()
+        .appendingPathComponent("Import-" + UUID().uuidString, isDirectory: true)
+        .standardizedFileURL
+      try fm.createDirectory(at: staging, withIntermediateDirectories: false)
+      active.insert(staging.path)
+      return staging
+    }
+  }
+
+  func finish(_ staging: URL) {
+    work.sync {
+      defer { active.remove(staging.standardizedFileURL.path) }
+      do { try removeItem(staging) }
+      catch { NSLog("雷player: 导入暂存清理失败 %@ %@", staging.lastPathComponent, error.localizedDescription) }
+    }
+  }
+
+  private func removeAbandoned(in support: URL) -> [URL] {
+    var failed: [URL] = []
+    do {
+      let base = support.standardizedFileURL.resolvingSymlinksInPath()
+      let entries = try fm.contentsOfDirectory(at: base,
+        includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+      for entry in entries {
+        let name = entry.lastPathComponent
+        // Only the exact private staging format is owned by this cleanup.
+        // Do not follow symlinks or inspect Documents/user-selected sources.
+        guard name.hasPrefix("Import-"), UUID(uuidString: String(name.dropFirst(7))) != nil,
+          !active.contains(entry.standardizedFileURL.path) else { continue }
+        do {
+          let values = try entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+          guard values.isDirectory == true, values.isSymbolicLink != true,
+            entry.standardizedFileURL.resolvingSymlinksInPath().deletingLastPathComponent().path == base.path else { continue }
+          try removeItem(entry)
+        } catch {
+          failed.append(entry)
+          NSLog("雷player: 遗留导入暂存清理失败 %@ %@", name, error.localizedDescription)
+        }
+      }
+    } catch {
+      failed.append(support)
+      NSLog("雷player: 导入暂存目录读取失败 %@", error.localizedDescription)
+    }
+    return failed
   }
 }
 
@@ -346,10 +509,12 @@ final class CourseLibrary {
       .standardizedFileURL.resolvingSymlinksInPath()
     support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("LeiPlayer", isDirectory: true)
+      .standardizedFileURL.resolvingSymlinksInPath()
     try fm.createDirectory(at: root, withIntermediateDirectories: true)
     try fm.createDirectory(at: support, withIntermediateDirectories: true)
     try fm.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: root.path)
     recordStore = LibraryRecordStore(root: root, support: support)
+    ImportStagingStore.shared.recover(in: support)
   }
 
   /// Test-only-friendly initializer. Production continues to use the sandbox
@@ -360,6 +525,7 @@ final class CourseLibrary {
     try fm.createDirectory(at: self.root, withIntermediateDirectories: true)
     try fm.createDirectory(at: self.support, withIntermediateDirectories: true)
     recordStore = LibraryRecordStore(root: self.root, support: self.support)
+    ImportStagingStore.shared.recover(in: self.support)
   }
 
   func url(_ path: String, allowRoot: Bool = false) throws -> URL {
@@ -514,7 +680,7 @@ final class CourseLibrary {
     guard !fm.fileExists(atPath: destination.path) else { throw LibraryFailure.app("destination_duplicate_item") }
     let new = try relative(destination)
     do {
-      try recordStore.fileMutation(kind: "move", source: source, destination: destination) { records in
+      try recordStore.fileMutation(kind: "move", source: source, destination: destination) { records, _ in
         for key in Array(records.keys) where key == path || key.hasPrefix(path + "/") {
           records[new + String(key.dropFirst(path.count))] = records.removeValue(forKey: key)
         }
@@ -538,7 +704,13 @@ final class CourseLibrary {
       try Data(String(Date().timeIntervalSince1970).utf8)
         .write(to: directory.appendingPathComponent("deletedAt.txt"), options: .atomic)
       try recordStore.fileMutation(kind: "move", source: source,
-        destination: directory.appendingPathComponent("content")) { _ in }
+        destination: directory.appendingPathComponent("content")) { records, archived in
+          var saved: LibraryRecordStore.Records = [:]
+          for key in Array(records.keys) where key == path || key.hasPrefix(path + "/") {
+            saved[key] = records.removeValue(forKey: key)
+          }
+          archived[token] = saved
+        }
       return token
     } catch {
       // A failed post-move record commit still owns the recoverable content.
@@ -559,7 +731,13 @@ final class CourseLibrary {
     guard !fm.fileExists(atPath: target.path) else { throw LibraryFailure.app("restore_destination_exists") }
     try fm.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
     try recordStore.fileMutation(kind: "move", source: directory.appendingPathComponent("content"),
-      destination: target) { _ in }
+      destination: target) { records, archived in
+        for key in Array(records.keys) where key == path || key.hasPrefix(path + "/") {
+          records.removeValue(forKey: key)
+        }
+        for (key, fields) in archived.removeValue(forKey: token) ?? [:]
+          where key == path || key.hasPrefix(path + "/") { records[key] = fields }
+      }
     try? fm.removeItem(at: directory)
   }
 
@@ -591,14 +769,8 @@ final class CourseLibrary {
     guard fm.fileExists(atPath: directory.path) else { return }
     for item in try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
       guard UUID(uuidString: item.lastPathComponent) != nil else { continue }
-      let path = try? String(contentsOf: item.appendingPathComponent("original.txt"), encoding: .utf8)
-      try recordStore.fileMutation(kind: "purge", source: item, destination: nil) { records in
-        guard let path = path, let original = try? self.url(path),
-          !self.fm.fileExists(atPath: original.path) else { return }
-        for key in Array(records.keys) where key == path || key.hasPrefix(path + "/") {
-          // Do not delete records of a new file imported at the same path.
-          if !self.fm.fileExists(atPath: self.root.appendingPathComponent(key).path) { records.removeValue(forKey: key) }
-        }
+      try recordStore.fileMutation(kind: "purge", source: item, destination: nil) { _, archived in
+        archived.removeValue(forKey: item.lastPathComponent)
       }
     }
   }
@@ -614,9 +786,8 @@ final class CourseLibrary {
                    skipped: @escaping (String) -> Void = { _ in },
                    progress: @escaping (String, Int64, Int64) -> Void) throws -> [String] {
     let destination = try url(parent, allowRoot: true)
-    let staging = support.appendingPathComponent("Import-" + UUID().uuidString, isDirectory: true)
-    try fm.createDirectory(at: staging, withIntermediateDirectories: true)
-    defer { try? fm.removeItem(at: staging) }
+    let staging = try ImportStagingStore.shared.begin(in: support)
+    defer { ImportStagingStore.shared.finish(staging) }
     var imported: [String] = []
     for source in sources {
       try checkCancellation(cancellation)

@@ -234,68 +234,90 @@ Future<T?> showLeiDialog<T>({
   bool platformViewBackdrop = false,
   bool fixedNearTop = false,
   required List<GlassDialogAction> actions,
-}) => showGeneralDialog<T>(
-  context: context,
-  barrierDismissible: false,
-  barrierColor: Colors.black54,
-  pageBuilder: (context, animation, secondaryAnimation) => SafeArea(
-    child: AnimatedPadding(
-      duration: fixedNearTop
-          ? Duration.zero
-          : const Duration(milliseconds: 180),
-      padding: fixedNearTop
-          ? const EdgeInsets.fromLTRB(24, 56, 24, 24)
-          : EdgeInsets.fromLTRB(
-              24,
-              24,
-              24,
-              MediaQuery.viewInsetsOf(context).bottom + 24,
-            ),
-      child: Align(
-        alignment: fixedNearTop ? Alignment.topCenter : Alignment.center,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 360),
-          child: SingleChildScrollView(
-            child: AdaptiveLiquidGlassLayer(
-              quality: platformViewBackdrop
-                  ? GlassQuality.minimal
-                  : GlassQuality.standard,
-              platformViewBackdrop: platformViewBackdrop,
-              child: GlassDialog(
-                title: title == null
-                    ? null
-                    : localizeTitle
-                    ? AppLocalizations.of(context).text(title, args: titleArgs)
-                    : title,
-                message: message == null
-                    ? null
-                    : localizeMessage
-                    ? AppLocalizations.of(context).text(
-                        message,
-                        args: messageArgs,
-                      )
-                    : message,
-                content: content,
-                quality: platformViewBackdrop
-                    ? GlassQuality.minimal
-                    : GlassQuality.standard,
-                actions: [
-                  for (final action in actions)
-                    GlassDialogAction(
-                      label: AppLocalizations.of(context).text(action.label),
-                      onPressed: action.onPressed,
-                      isPrimary: action.isPrimary,
-                      isDestructive: action.isDestructive,
+}) {
+  // General-dialog routes are built under the navigator, outside any local
+  // playback theme. Carry the caller's theme, text and icon styles with them.
+  final themes = InheritedTheme.capture(
+    from: context,
+    to: Navigator.of(context, rootNavigator: true).context,
+  );
+  final theme = Theme.of(context);
+  final cupertinoTheme = theme.cupertinoOverrideTheme == null
+      ? CupertinoTheme.of(context)
+      : MaterialBasedCupertinoThemeData(materialTheme: theme);
+  return showGeneralDialog<T>(
+    context: context,
+    barrierDismissible: false,
+    barrierColor: Colors.black54,
+    pageBuilder: (context, animation, secondaryAnimation) => themes.wrap(
+      CupertinoTheme(
+        data: cupertinoTheme,
+        child: DefaultTextStyle(
+          style: theme.textTheme.bodyMedium!,
+          child: SafeArea(
+            child: AnimatedPadding(
+              duration: fixedNearTop
+                  ? Duration.zero
+                  : const Duration(milliseconds: 180),
+              padding: fixedNearTop
+                  ? const EdgeInsets.fromLTRB(24, 56, 24, 24)
+                  : EdgeInsets.fromLTRB(
+                      24,
+                      24,
+                      24,
+                      MediaQuery.viewInsetsOf(context).bottom + 24,
                     ),
-                ],
+              child: Align(
+                alignment: fixedNearTop
+                    ? Alignment.topCenter
+                    : Alignment.center,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 360),
+                  child: SingleChildScrollView(
+                    child: AdaptiveLiquidGlassLayer(
+                      quality: platformViewBackdrop
+                          ? GlassQuality.minimal
+                          : GlassQuality.standard,
+                      platformViewBackdrop: platformViewBackdrop,
+                      child: GlassDialog(
+                        title: title == null
+                            ? null
+                            : localizeTitle
+                            ? AppLocalizations.of(context)
+                                  .text(title, args: titleArgs)
+                            : title,
+                        message: message == null
+                            ? null
+                            : localizeMessage
+                            ? AppLocalizations.of(context)
+                                  .text(message, args: messageArgs)
+                            : message,
+                        content: content,
+                        quality: platformViewBackdrop
+                            ? GlassQuality.minimal
+                            : GlassQuality.standard,
+                        actions: [
+                          for (final action in actions)
+                            GlassDialogAction(
+                              label: AppLocalizations.of(context)
+                                  .text(action.label),
+                              onPressed: action.onPressed,
+                              isPrimary: action.isPrimary,
+                              isDestructive: action.isDestructive,
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
         ),
       ),
     ),
-  ),
-);
+  );
+}
 
 /// Trailing controls are siblings of the tile surface so their glass remains active.
 class LeiGlassTile extends StatelessWidget {

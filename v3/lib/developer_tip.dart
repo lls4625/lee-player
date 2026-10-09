@@ -96,6 +96,7 @@ class DeveloperTipController extends ChangeNotifier with WidgetsBindingObserver 
   bool _transportUnknown = false;
   String _storage = 'initializing';
   AppMessage? _catalogMessage;
+  AppMessage? _productLoadMessage;
   AppMessage? _operationMessage;
   String? _processingProductId;
   String? _requestId;
@@ -130,7 +131,7 @@ class DeveloperTipController extends ChangeNotifier with WidgetsBindingObserver 
     if (_transportUnknown) return const AppMessage('tip_unresolved');
     if (_awaitingApproval) return const AppMessage('purchase_pending');
     if (_hasUnresolved && !busy) return const AppMessage('tip_unresolved');
-    return _operationMessage ?? _catalogMessage;
+    return _operationMessage ?? _productLoadMessage ?? _catalogMessage;
   }
 
   void _notify() {
@@ -170,6 +171,12 @@ class DeveloperTipController extends ChangeNotifier with WidgetsBindingObserver 
           .whereType<DeveloperTipProduct>().toList()
         ..sort((a, b) => displayOrder.indexOf(a.id).compareTo(displayOrder.indexOf(b.id)));
       _products..clear()..addAll(next);
+      // A newer native catalog result can arrive after the channel timed out.
+      // Let that authoritative success/failure replace only the load error.
+      if (next.isNotEmpty && code == null ||
+          const {'purchase_products_unavailable', 'purchase_products_load_failed'}.contains(code)) {
+        _productLoadMessage = null;
+      }
     }
     // Historical snapshot fields must never become a presentation instance.
     _initialized = true;
@@ -285,9 +292,14 @@ class DeveloperTipController extends ChangeNotifier with WidgetsBindingObserver 
     }
   }
 
-  void _record(Object error) {
-    _operationMessage = AppMessage(error is PlatformException
+  void _record(Object error, {bool productLoad = false}) {
+    final message = AppMessage(error is PlatformException
         ? error.code : 'purchase_service_unavailable');
+    if (productLoad) {
+      _productLoadMessage = message;
+    } else {
+      _operationMessage = message;
+    }
     _notify();
   }
 
@@ -344,11 +356,14 @@ class DeveloperTipController extends ChangeNotifier with WidgetsBindingObserver 
   Future<void> loadProducts() async {
     if (_disposed || !supported || _loading || busy) return;
     _loading = true;
+    // A catalog retry only supersedes its own error. Purchase and payment
+    // reconciliation messages have a separate lifetime.
+    _productLoadMessage = null;
     _notify();
     try {
       applyNativeState(await _invoke('loadProducts'));
     } catch (error) {
-      _record(error);
+      _record(error, productLoad: true);
     } finally {
       _loading = false;
       _notify();
@@ -378,7 +393,7 @@ class DeveloperTipController extends ChangeNotifier with WidgetsBindingObserver 
       final preflight = error is PlatformException && (
         const {'purchase_busy', 'purchase_product_invalid', 'purchase_restricted'}.contains(error.code) ||
         details is Map && details['paymentStarted'] == false && details['requestId'] == requestId);
-      if (preflight && error is PlatformException) {
+      if (preflight) {
         _transportUnknown = false;
         _requestOutcome = 'failed';
         if (error.code != 'purchase_busy') _record(error);

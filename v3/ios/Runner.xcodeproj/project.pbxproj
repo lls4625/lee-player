@@ -25,6 +25,8 @@
 		AE1100000000000000000006 /* DeveloperTipPurchase.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000006 /* DeveloperTipPurchase.swift */; };
 		AE1100000000000000000007 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000008 /* PrivacyInfo.xcprivacy */; };
 		B4155353CB543B99CDBD1E8F /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F4E9B9CB95E1DDFF924E1856 /* Pods_Runner.framework */; };
+		AA1000000000000000000004 /* PlaybackSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000004 /* PlaybackSessionTests.swift */; };
+		AA1000000000000000000005 /* MediaKitPiPSeekTests.m in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000005 /* MediaKitPiPSeekTests.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -81,6 +83,8 @@
 		AE2200000000000000000008 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		F4E9B9CB95E1DDFF924E1856 /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		FAF9FF1A33363CC6BE97EC5E /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
+		AA2000000000000000000004 /* PlaybackSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackSessionTests.swift; sourceTree = "<group>"; };
+		AA2000000000000000000005 /* MediaKitPiPSeekTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MediaKitPiPSeekTests.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -176,6 +180,8 @@
 			children = (
 				AA2000000000000000000001 /* DeveloperTipsStoreKitTests.swift */,
 				AA2000000000000000000003 /* NativeRecoveryPolicyTests.swift */,
+				AA2000000000000000000005 /* MediaKitPiPSeekTests.m */,
+				AA2000000000000000000004 /* PlaybackSessionTests.swift */,
 			);
 			path = RunnerTests;
 			sourceTree = "<group>";
@@ -394,6 +400,8 @@
 			files = (
 				AA1000000000000000000001 /* DeveloperTipsStoreKitTests.swift in Sources */,
 				AA1000000000000000000003 /* NativeRecoveryPolicyTests.swift in Sources */,
+				AA1000000000000000000005 /* MediaKitPiPSeekTests.m in Sources */,
+				AA1000000000000000000004 /* PlaybackSessionTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

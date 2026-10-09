@@ -495,9 +495,9 @@ class PlayerModel extends ChangeNotifier {
       if (_fileCommand == commandId) { _fileCommand = null; _notify(); }
     }
     if (mutation && _uncertainOperations.isNotEmpty) unawaited(reconcileOperations());
-    if (failureMessage?.code == 'import_partial_failure' &&
-        failureMessage?.args['reasonCode'] == 'import_cancelled' &&
-        failureMessage?.args['completed'] == 0) failureMessage = null;
+    if (failureMessage.code == 'import_partial_failure' &&
+        failureMessage.args['reasonCode'] == 'import_cancelled' &&
+        failureMessage.args['completed'] == 0) failureMessage = null;
     if (failureMessage?.code.startsWith('library_records_') == true) {
       recordsIssue = failureMessage;
     } else if (!silent && failureMessage != null && !const {

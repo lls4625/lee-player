@@ -553,7 +553,8 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         }
         return
       case "subtitle":
-        playback.requestSubtitle(path: args["path"] as? String ?? "") { code in
+        guard let session = args["generation"] as? Int else { throw LibraryFailure.app("track_selection_stale") }
+        playback.requestSubtitle(path: args["path"] as? String ?? "", session: session) { code in
           if let code { result(FlutterError(code: code, message: nil, details: nil)) }
           else { result(self.playback.snapshot()) }
         }; return
