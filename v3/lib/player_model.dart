@@ -44,6 +44,21 @@ class PlayerModel extends ChangeNotifier {
   int _nextCommandId = 0;
   final Map<String, int> _activeCommands = <String, int>{};
   final Map<String, String> _uncertainOperations = <String, String>{};
+  int? _fileCommand;
+  bool get fileBusy => _fileCommand != null || _uncertainOperations.isNotEmpty || importing;
+  AppMessage? recordsIssue;
+  int _recordsRevision = -1;
+  AppMessage? importIssue;
+  List<String> importSkippedPaths = [];
+  int importSkippedCount = 0;
+  void clearImportIssue() { importIssue = null; _notify(); }
+  final Set<String> _loadedPreferences = {};
+  final Map<String, int> _preferenceVersions = {};
+  Future<void>? _preferenceRetry;
+  Timer? _preferenceTimer;
+  int _preferenceAttempts = 0;
+  String _scanWarningIdentity = '';
+  String? _controlFailureIdentity;
   Future<void>? _initialization;
   Completer<bool>? _refreshCompleter;
   bool _refreshQueued = false;
@@ -58,32 +73,44 @@ class PlayerModel extends ChangeNotifier {
   AppLanguageMode languageMode = AppLanguageMode.system;
   String libraryLayout = 'list', librarySort = 'name';
   bool librarySortAscending = true;
-  Future<bool> loadAppearance() => command(
-    'appearance',
-    onValue: (value) {
-      appearance = value as String;
-    },
-  );
-  Future<bool> setAppearance(String value) => command(
-    'setAppearance',
-    args: {'value': value},
-    onValue: (saved) {
-      appearance = saved as String;
-    },
-  );
-  Future<bool> loadLanguage() => command(
-    'language',
-    onValue: (value) {
-      languageMode = AppLanguageModeValue.parse(value);
-    },
-  );
-  Future<bool> setLanguage(AppLanguageMode value) => command(
-    'setLanguage',
-    args: {'value': value.value},
-    onValue: (saved) {
-      languageMode = AppLanguageModeValue.parse(saved);
-    },
-  );
+  Future<bool> _loadPreference(String method, void Function(dynamic) apply) async {
+    final version = _preferenceVersions[method] ?? 0;
+    final success = await command(method, silent: true, onValue: (value) {
+      if ((_preferenceVersions[method] ?? 0) == version) {
+        apply(value);
+        _loadedPreferences.add(method);
+      }
+    });
+    return success;
+  }
+  Future<bool> loadAppearance() => _loadPreference('appearance', (value) {
+    appearance = value as String;
+  });
+  Future<bool> setAppearance(String value) {
+    _preferenceVersions.update('appearance', (n) => n + 1, ifAbsent: () => 1);
+    return command(
+      'setAppearance',
+      args: {'value': value},
+      onValue: (saved) {
+        appearance = saved as String;
+        _loadedPreferences.add('appearance');
+      },
+    );
+  }
+  Future<bool> loadLanguage() => _loadPreference('language', (value) {
+    languageMode = AppLanguageModeValue.parse(value);
+  });
+  Future<bool> setLanguage(AppLanguageMode value) {
+    _preferenceVersions.update('language', (n) => n + 1, ifAbsent: () => 1);
+    return command(
+      'setLanguage',
+      args: {'value': value.value},
+      onValue: (saved) {
+        languageMode = AppLanguageModeValue.parse(saved);
+        _loadedPreferences.add('language');
+      },
+    );
+  }
   void applyLibraryPreferences(dynamic value) {
     final saved = Map<String, dynamic>.from(value as Map);
     final layout = saved['layout'] as String?;
@@ -96,20 +123,26 @@ class PlayerModel extends ChangeNotifier {
   }
 
   Future<bool> loadLibraryPreferences() =>
-      command('libraryPreferences', onValue: applyLibraryPreferences);
+      _loadPreference('libraryPreferences', applyLibraryPreferences);
   Future<bool> setLibraryPreferences({
     String? layout,
     String? sort,
     bool? ascending,
-  }) => command(
-    'setLibraryPreferences',
-    args: {
-      if (layout != null) 'layout': layout,
-      if (sort != null) 'sort': sort,
-      if (ascending != null) 'ascending': ascending,
-    },
-    onValue: applyLibraryPreferences,
-  );
+  }) {
+    _preferenceVersions.update('libraryPreferences', (n) => n + 1, ifAbsent: () => 1);
+    return command(
+      'setLibraryPreferences',
+      args: {
+        if (layout != null) 'layout': layout,
+        if (sort != null) 'sort': sort,
+        if (ascending != null) 'ascending': ascending,
+      },
+      onValue: (value) {
+        applyLibraryPreferences(value);
+        _loadedPreferences.add('libraryPreferences');
+      },
+    );
+  }
   AppMessage? message;
   Future<void> Function(String? restoreToken)? onOpenPlayer;
   String get path => state['path'] as String? ?? '';
@@ -140,7 +173,7 @@ class PlayerModel extends ChangeNotifier {
         final data = Map<String, dynamic>.from(event as Map);
         switch (data['type']) {
           case 'player':
-            state = Map<String, dynamic>.from(data['state'] as Map);
+            _applyState(data['state']);
             if (path.isNotEmpty && duration > 0) {
               if (playing && record(path)['lastPlayed'] == null)
                 libraryRevision++;
@@ -154,6 +187,9 @@ class PlayerModel extends ChangeNotifier {
                   'lastPlayed': DateTime.now().millisecondsSinceEpoch / 1000,
               };
             }
+            break;
+          case 'records':
+            _applyRecords(data);
             break;
           case 'import':
             importProgress = data;
@@ -169,6 +205,10 @@ class PlayerModel extends ChangeNotifier {
             break;
           case 'scanWarning':
             final warnings = data['warnings'];
+            final identity = warnings is List ? warnings.map((value) =>
+              value is Map ? '${value['code']}:${value['path']}' : '').join('|') : '';
+            if (identity == _scanWarningIdentity) break;
+            _scanWarningIdentity = identity;
             if (warnings is List && warnings.isNotEmpty) {
               final symbolicLinks = warnings
                   .where(
@@ -186,20 +226,7 @@ class PlayerModel extends ChangeNotifier {
             }
             break;
           case 'operation':
-            final operationId = data['operationId'] as String?;
-            if (operationId != null && data['state'] == 'completed') {
-              final method = _uncertainOperations.remove(operationId);
-              if (method != null) {
-                if (data['success'] == true) {
-                  message = const AppMessage('operation_late_completed');
-                  if (_mutationMethods.contains(method)) unawaited(refresh());
-                } else {
-                  message = AppMessage(
-                    data['code'] as String? ?? 'operation_failed',
-                  );
-                }
-              }
-            }
+            _applyOperation(data);
             break;
           case 'notice':
             message = AppMessage.fromMap(
@@ -212,11 +239,7 @@ class PlayerModel extends ChangeNotifier {
       },
       onError: (Object error) {
         if (_disposed || epoch != _eventEpoch) return;
-        message = AppMessage(
-          'native_service_disconnected',
-          technicalDetail: '$error',
-        );
-        _notify();
+        // Reconnect silently; a failed user command reports its own outcome.
         scheduleMicrotask(() => _disconnectEvents(epoch));
       },
       onDone: () {
@@ -245,10 +268,11 @@ class PlayerModel extends ChangeNotifier {
       _connectEvents();
       await command(
         'state',
-        onValue: (value) {
-          state = Map<String, dynamic>.from(value as Map);
-        },
+        silent: true,
+        onValue: _applyState,
       );
+      unawaited(retryPreferences());
+      unawaited(reconcileOperations());
     });
   }
 
@@ -260,6 +284,74 @@ class PlayerModel extends ChangeNotifier {
     return future;
   }
 
+  void _applyState(dynamic value) {
+    if (value is! Map) return;
+    final incoming = Map<String, dynamic>.from(value);
+    final generation = (incoming['generation'] as num?)?.toInt() ?? 0;
+    if (generation < ((state['generation'] as num?)?.toInt() ?? 0)) return;
+    if (generation == state['generation'] && incoming['revision'] is num && state['revision'] is num &&
+        (incoming['revision'] as num) < (state['revision'] as num)) return;
+    state = incoming;
+  }
+
+  void _applyRecords(dynamic value) {
+    if (value is! Map) return;
+    final revision = value['revision'];
+    final wrapped = revision is num && value['records'] is Map;
+    if (wrapped) {
+      if (revision.toInt() < _recordsRevision) return;
+      _recordsRevision = revision.toInt();
+      final status = value['status'] as String?;
+      recordsIssue = status == null || status == 'healthy' || status == 'library_records_loading'
+          ? null : AppMessage(status);
+    }
+    final raw = wrapped ? value['records'] as Map : value;
+    records = raw.map((key, item) => MapEntry(key as String, Map<String, dynamic>.from(item as Map)));
+    libraryRevision++;
+  }
+
+  void _applyOperation(Map<dynamic, dynamic> data) {
+    final id = data['operationId'] as String?;
+    if (id == null || data['state'] != 'completed') return;
+    final method = _uncertainOperations.remove(id);
+    if (method == null) return;
+    unawaited(refresh());
+    if (data['success'] != true) {
+      final failure = AppMessage(data['code'] as String? ?? 'operation_failed');
+      if (failure.code.startsWith('library_records_')) { recordsIssue = failure; }
+      else { message = failure; }
+    }
+  }
+
+  Future<void> reconcileOperations() async {
+    if (_uncertainOperations.isEmpty) return;
+    await command('operationStatus', silent: true,
+      args: {'ids': _uncertainOperations.keys.toList()},
+      onValue: (value) { if (value is List) { for (final item in value.whereType<Map>()) { _applyOperation(item); } } });
+  }
+
+  Future<void> retryPreferences() {
+    final existing = _preferenceRetry;
+    if (existing != null) return existing;
+    final future = _retryPreferences();
+    _preferenceRetry = future;
+    return future.whenComplete(() { if (identical(_preferenceRetry, future)) _preferenceRetry = null; });
+  }
+
+  Future<void> _retryPreferences() async {
+    if (_disposed) return;
+    await Future.wait([
+      if (!_loadedPreferences.contains('appearance')) loadAppearance(),
+      if (!_loadedPreferences.contains('language')) loadLanguage(),
+      if (!_loadedPreferences.contains('libraryPreferences')) loadLibraryPreferences(),
+    ]);
+    if (_disposed || _loadedPreferences.length == 3) { _preferenceTimer?.cancel(); return; }
+    if (_preferenceAttempts < 5) {
+      _preferenceTimer?.cancel();
+      _preferenceTimer = Timer(Duration(seconds: 1 << ++_preferenceAttempts), () { unawaited(retryPreferences()); });
+    }
+  }
+
   Future<void> _initialize() async {
     if (_disposed) return;
     initializing = true;
@@ -268,15 +360,10 @@ class PlayerModel extends ChangeNotifier {
     try {
       await command(
         'state',
-        onValue: (value) {
-          state = Map<String, dynamic>.from(value as Map);
-        },
+        silent: true,
+        onValue: _applyState,
       );
-      await Future.wait<bool>([
-        loadAppearance(),
-        loadLanguage(),
-        loadLibraryPreferences(),
-      ]);
+      await retryPreferences();
       await refresh();
     } finally {
       initializing = false;
@@ -298,7 +385,7 @@ class PlayerModel extends ChangeNotifier {
     if (_isolatedReadMethods.contains(method))
       return const Duration(seconds: 35);
     if (_mutationMethods.contains(method)) return const Duration(seconds: 50);
-    if (method == 'open' || method == 'pip') return const Duration(seconds: 30);
+    if (method == 'open' || method == 'pip' || method == 'configure') return const Duration(seconds: 30);
     if (method == 'seek' || method == 'track')
       return const Duration(seconds: 12);
     return const Duration(seconds: 10);
@@ -319,9 +406,13 @@ class PlayerModel extends ChangeNotifier {
     String method, {
     Map<String, dynamic>? args,
     void Function(dynamic)? onValue,
+    bool silent = false,
   }) async {
     if (_disposed) return false;
+    final mutation = _mutationMethods.contains(method);
+    if (mutation && fileBusy) return false;
     final commandId = ++_nextCommandId;
+    if (mutation) { _fileCommand = commandId; _notify(); }
     _activeCommands[method] = commandId;
     final effectiveArgs = <String, dynamic>{...?args};
     if ((_mutationMethods.contains(method) ||
@@ -331,6 +422,7 @@ class PlayerModel extends ChangeNotifier {
           '${DateTime.now().microsecondsSinceEpoch}-$commandId';
     }
     bool isCurrent() => !_disposed && _activeCommands[method] == commandId;
+    AppMessage? failureMessage;
     try {
       final pending = _methods.invokeMethod<dynamic>(
         method,
@@ -343,6 +435,7 @@ class PlayerModel extends ChangeNotifier {
       if (!isCurrent()) return false;
       _activeCommands.remove(method);
       onValue?.call(value);
+      if (method == 'configure' || method == 'subtitle') _controlFailureIdentity = null;
       _notify();
       return true;
     } on TimeoutException catch (error) {
@@ -353,7 +446,7 @@ class PlayerModel extends ChangeNotifier {
         if (_mutationMethods.contains(method)) {
           _uncertainOperations[operationId] = method;
         }
-        message = AppMessage(
+        failureMessage = AppMessage(
           'operation_timeout',
           args: {
             'operationId': operationId,
@@ -362,7 +455,7 @@ class PlayerModel extends ChangeNotifier {
           technicalDetail: '$method: $error',
         );
       } else {
-        message = AppMessage(
+        failureMessage = AppMessage(
           'operation_failed',
           technicalDetail: '$method: $error',
         );
@@ -380,7 +473,7 @@ class PlayerModel extends ChangeNotifier {
             : null;
         if (operationId != null) _uncertainOperations[operationId] = method;
       }
-      message = details is Map
+      failureMessage = details is Map
           ? AppMessage.fromMap(<dynamic, dynamic>{
               ...details,
               'code': error.code,
@@ -393,11 +486,28 @@ class PlayerModel extends ChangeNotifier {
     } on MissingPluginException {
       if (!isCurrent()) return false;
       _activeCommands.remove(method);
-      message = const AppMessage('native_service_unavailable');
+      failureMessage = const AppMessage('native_service_unavailable');
     } catch (error) {
       if (!isCurrent()) return false;
       _activeCommands.remove(method);
-      message = AppMessage('operation_failed', technicalDetail: '$error');
+      failureMessage = AppMessage('operation_failed', technicalDetail: '$error');
+    } finally {
+      if (_fileCommand == commandId) { _fileCommand = null; _notify(); }
+    }
+    if (mutation && _uncertainOperations.isNotEmpty) unawaited(reconcileOperations());
+    if (failureMessage?.code == 'import_partial_failure' &&
+        failureMessage?.args['reasonCode'] == 'import_cancelled' &&
+        failureMessage?.args['completed'] == 0) failureMessage = null;
+    if (failureMessage?.code.startsWith('library_records_') == true) {
+      recordsIssue = failureMessage;
+    } else if (!silent && failureMessage != null && !const {
+      'file_operation_busy', 'purchase_busy', 'import_cancelled', 'control_superseded',
+    }.contains(failureMessage.code)) {
+      final identity = '${state['generation']}:${failureMessage.code}';
+      if (method != 'configure' && method != 'subtitle' || identity != _controlFailureIdentity) {
+        message = failureMessage;
+      }
+      if (method == 'configure' || method == 'subtitle') _controlFailureIdentity = identity;
     }
     _notify();
     return false;
@@ -449,22 +559,18 @@ class PlayerModel extends ChangeNotifier {
 
   Future<bool> loadRecords() => command(
     'records',
-    onValue: (value) {
-      records = (value as Map).map(
-        (key, value) =>
-            MapEntry(key as String, Map<String, dynamic>.from(value as Map)),
-      );
-      libraryRevision++;
-    },
+    onValue: _applyRecords,
   );
   Future<void> importMedia({
     required bool folder,
     required String parent,
   }) async {
-    if (importing || scanning) return;
+    if (fileBusy || scanning) return;
     importing = true;
+    importIssue = null; importSkippedPaths = []; importSkippedCount = 0;
     _notify();
     var count = 0;
+    var skippedCount = 0;
     List<String> importedPaths = [];
     var copied = false;
     try {
@@ -475,6 +581,10 @@ class PlayerModel extends ChangeNotifier {
           if (value is Map) {
             count = (value['count'] as num).toInt();
             importedPaths = (value['paths'] as List).cast<String>();
+            skippedCount = (value['skippedCount'] as num?)?.toInt() ?? 0;
+            importSkippedCount = skippedCount;
+            importSkippedPaths = (value['warnings'] as List? ?? const [])
+                .whereType<Map>().map((warning) => warning['path']).whereType<String>().toList();
           } else if (value is num) {
             // The picker returns zero on cancellation; tolerate an older native bridge.
             count = value.toInt();
@@ -500,8 +610,8 @@ class PlayerModel extends ChangeNotifier {
           'import_verification_failed',
           args: {'count': count},
         );
-      } else {
-        message = AppMessage('import_completed', args: {'count': count});
+      } else if (skippedCount > 0) {
+        importIssue = AppMessage('import_skipped_items', args: {'count': skippedCount});
       }
       _notify();
     }
@@ -518,6 +628,7 @@ class PlayerModel extends ChangeNotifier {
       'index': files.indexWhere((item) => item.path == selected.path),
       'resume': resume,
     },
+    onValue: _applyState,
   );
   Future<void> favorite(MediaEntry item) async {
     final value = record(item.path)['favorite'] != true;
@@ -528,8 +639,36 @@ class PlayerModel extends ChangeNotifier {
     }
   }
 
-  Future<bool> configure(Map<String, dynamic> values) =>
-      command('configure', args: values);
+  Map<String, dynamic> _pendingConfiguration = {};
+  final List<Completer<bool>> _configurationWaiters = [];
+  bool _configuring = false;
+  Object? _configurationGeneration;
+  Future<bool> configure(Map<String, dynamic> values) {
+    final completer = Completer<bool>();
+    if (_configurationWaiters.isNotEmpty && _configurationGeneration != state['generation']) {
+      for (final waiter in _configurationWaiters) { waiter.complete(false); }
+      _configurationWaiters.clear(); _pendingConfiguration = {};
+    }
+    _configurationGeneration = state['generation'];
+    _pendingConfiguration.addAll(values);
+    _configurationWaiters.add(completer);
+    if (!_configuring) unawaited(_drainConfiguration());
+    return completer.future;
+  }
+  Future<void> _drainConfiguration() async {
+    _configuring = true;
+    try {
+      while (_configurationWaiters.isNotEmpty) {
+        final values = _pendingConfiguration;
+        final generation = _configurationGeneration;
+        final waiters = List<Completer<bool>>.of(_configurationWaiters);
+        _pendingConfiguration = {}; _configurationWaiters.clear();
+        final success = generation == state['generation'] && await command('configure',
+          args: {...values, if (generation != null) 'generation': generation}, onValue: _applyState);
+        for (final waiter in waiters) { waiter.complete(success); }
+      }
+    } finally { _configuring = false; }
+  }
   Future<bool> seek(double value) async {
     var finished = false;
     final accepted = await command(
@@ -545,7 +684,23 @@ class PlayerModel extends ChangeNotifier {
   Future<bool> previewSeek(double value) =>
       command('previewSeek', args: {'seconds': value});
   Future<bool> cancelScrub() => command('cancelScrub');
-  Future<bool> toggle() => command(playing || loading ? 'pause' : 'play');
+  bool? _desiredPlaying;
+  Future<bool>? _toggleDrain;
+  Future<bool> toggle() {
+    _desiredPlaying = !(_desiredPlaying ?? (state['wantsPlayback'] as bool? ?? (playing || loading)));
+    return _toggleDrain ??= _drainToggle().whenComplete(() {
+      _toggleDrain = null; _desiredPlaying = null;
+    });
+  }
+  Future<bool> _drainToggle() async {
+    final generation = state['generation'];
+    while (!_disposed && generation == state['generation']) {
+      final desired = _desiredPlaying!;
+      if (!await command(desired ? 'play' : 'pause', onValue: _applyState)) return false;
+      if (_desiredPlaying == desired) return true;
+    }
+    return false;
+  }
   void consumeMessage() {
     message = null;
   }
@@ -556,6 +711,7 @@ class PlayerModel extends ChangeNotifier {
     _activeCommands.clear();
     _eventEpoch++;
     _eventReconnectTimer?.cancel();
+    _preferenceTimer?.cancel();
     _subscription?.cancel();
     _subscription = null;
     mediaKit.removeListener(_notify);
@@ -564,6 +720,8 @@ class PlayerModel extends ChangeNotifier {
   }
 
   static const Set<String> _mutationMethods = <String>{
+    'favorite',
+    'clearHistory',
     'createFolder',
     'move',
     'trash',

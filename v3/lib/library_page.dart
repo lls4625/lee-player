@@ -41,11 +41,7 @@ class LegalDocumentPage extends StatelessWidget {
     }
     if (opened || !context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          AppLocalizations.of(context).text('无法打开在线隐私政策，请稍后重试。'),
-        ),
-      ),
+      const SnackBar(content: LText('无法打开在线隐私政策，请稍后重试。')),
     );
   }
 
@@ -236,11 +232,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     };
     developerTip.onLightFeedback = (event) {
       if (!mounted) return;
-      final localizations = AppLocalizations.of(context);
       final name = DeveloperTipController.displayNameKeys[event.productId];
-      final message = localizations.message(AppMessage('tip_thanks', args: {
-        'support': name == null ? '' : localizations.text(name),
-      }));
       developerTipToast?.remove();
       developerTipToast?.dispose();
       developerTipToast = OverlayEntry(builder: (context) => Positioned(
@@ -249,7 +241,9 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         right: 20,
         child: IgnorePointer(child: Material(
           color: Colors.transparent,
-          child: LeiSurface(child: Text(message, textAlign: TextAlign.center)),
+          child: LeiSurface(child: Text(AppLocalizations.of(context).message(AppMessage('tip_thanks', args: {
+            'support': name == null ? '' : AppLocalizations.of(context).text(name),
+          })), textAlign: TextAlign.center)),
         )),
       ));
       Overlay.of(context, rootOverlay: true).insert(developerTipToast!);
@@ -273,7 +267,12 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) unawaited(m.refresh());
+    if (state == AppLifecycleState.resumed) {
+      unawaited(m.retryPreferences());
+      unawaited(m.reconcileOperations());
+      unawaited(m.command('retryRecords', silent: true));
+      unawaited(m.refresh());
+    }
   }
 
   @override
@@ -1357,7 +1356,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   Future<void> commonAction(String value) async {
     switch (value) {
       case 'new':
-        if (m.importing || m.scanning) return;
+        if (m.fileBusy || m.scanning) return;
         final name = await input('新建文件夹');
         if (name != null && name.isNotEmpty) {
           await m.command(
@@ -1368,13 +1367,13 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         }
         break;
       case 'import':
-        if (!m.importing && !m.scanning) await add();
+        if (!m.fileBusy && !m.scanning) await add();
         break;
       case 'refresh':
         await m.refresh();
         break;
       case 'move':
-        if (m.importing || m.scanning) return;
+        if (m.fileBusy || m.scanning) return;
         final candidates = List<MediaEntry>.of(visible);
         final entry = await showLeiSheet<MediaEntry>(
           context: context,
@@ -1452,7 +1451,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       onTap: () => commonAction(value),
     );
     return [
-      if (!m.importing && !m.scanning) ...[
+      if (!m.fileBusy && !m.scanning) ...[
         actionItem('新建文件夹', 'new'),
         actionItem('移动文件', 'move'),
         actionItem('导入文件 / 文件夹', 'import'),
@@ -1482,7 +1481,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           onTap: () => setLibrarySort(option.key),
         ),
       const GlassMenuDivider(),
-      if (!m.scanning && !m.importing) actionItem('刷新文件', 'refresh'),
+      if (!m.scanning && !m.fileBusy) actionItem('刷新文件', 'refresh'),
       actionItem('课程库', 'library'),
       actionItem('最近播放', 'history'),
       actionItem('我的收藏', 'favorites'),
@@ -1957,7 +1956,46 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                 children: [
                   if (m.scanning)
                     GlassProgressIndicator.linear(color: leiAccent(context)),
+                  if (m.recordsIssue != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
+                      child: Row(children: [
+                        Expanded(child: Text(AppLocalizations.of(context).message(m.recordsIssue!))),
+                        if (!const {'library_records_corrupt', 'library_records_version'}.contains(m.recordsIssue!.code))
+                          IconButton(
+                            tooltip: AppLocalizations.of(context).message(const AppMessage('library_records_retry')),
+                            icon: const Icon(Icons.refresh_rounded),
+                            onPressed: () => m.command('retryRecords', silent: true),
+                          ),
+                      ]),
+                    ),
                   if (m.importing) importStatus(),
+                  if (tab == 0 && m.importIssue != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
+                      child: Row(children: [
+                        Expanded(child: Text(AppLocalizations.of(context).message(m.importIssue!))),
+                        IconButton(
+                          tooltip: AppLocalizations.of(context).message(const AppMessage('import_skipped_details')),
+                          icon: const Icon(Icons.info_outline_rounded),
+                          onPressed: () => showLeiSheet<void>(context: context, builder: (context) =>
+                            SizedBox(height: MediaQuery.sizeOf(context).height * .5,
+                              child: ListView(padding: const EdgeInsets.all(20), children: [
+                                Text(AppLocalizations.of(context).message(const AppMessage('import_skipped_details')),
+                                  style: Theme.of(context).textTheme.titleLarge),
+                                const SizedBox(height: 12),
+                                for (final path in m.importSkippedPaths)
+                                  Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Text(path)),
+                                if (m.importSkippedCount > m.importSkippedPaths.length)
+                                  Text(AppLocalizations.of(context).message(AppMessage('import_skipped_limit',
+                                    args: {'count': m.importSkippedPaths.length}))),
+                              ]),
+                            )),
+                        ),
+                        IconButton(tooltip: AppLocalizations.of(context).text('关闭'),
+                          icon: const Icon(Icons.close_rounded), onPressed: m.clearImportIssue),
+                      ]),
+                    ),
                   if (tab == 3)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),

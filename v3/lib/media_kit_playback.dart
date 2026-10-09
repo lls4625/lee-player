@@ -74,9 +74,19 @@ class MediaKitPlayback extends ChangeNotifier {
     _log('video track restored vid=$track');
   }
 
+  final Map<String, MediaKitCommandPermit> _controlPermits = {};
   Future<dynamic> _handle(MethodCall call) {
     final args = Map<String, dynamic>.from(call.arguments as Map? ?? {});
     final id = args['engineId'] as String?;
+    final requestId = args['requestId'] as String?;
+    if (call.method == 'invalidateControl') {
+      if (id == _requestedId && requestId != null) {
+        _controlPermits[requestId]?.invalidate();
+        _failure = 'playback_control_failed';
+        unawaited(_publishFailure());
+      }
+      return Future<bool>.value(true);
+    }
     if (call.method == 'open') _requestedId = id;
     if (call.method == 'release' || call.method == 'stop' && _requestedId == id) _requestedId = null;
     final barrier = call.method == 'open' || call.method == 'release' ||
@@ -93,6 +103,9 @@ class MediaKitPlayback extends ChangeNotifier {
     }
     final epoch = _commandEpoch;
     final permit = MediaKitCommandPermit();
+    if (requestId != null && const {'rate', 'volume', 'loop', 'subtitle'}.contains(call.method)) {
+      _controlPermits[requestId] = permit;
+    }
     _activePermits.add(permit);
     if ((call.method == 'play' || call.method == 'pause') &&
         id != null && id == _requestedId) {
@@ -125,9 +138,17 @@ class MediaKitPlayback extends ChangeNotifier {
           _failure = 'media_kit_open_failed';
           await _publishFailure();
         }
+        if (error is TimeoutException && const {'rate', 'volume', 'loop', 'subtitle'}.contains(call.method) &&
+            _requestedId == id && epoch == _commandEpoch) {
+          // A timed-out plugin write is not cancelled. Quarantine this session
+          // instead of allowing a late write to overwrite subsequent controls.
+          _failure = 'playback_control_failed';
+          await _publishFailure();
+        }
         if (!result.isCompleted) result.complete(false);
       } finally {
         _activePermits.remove(permit);
+        if (requestId != null && identical(_controlPermits[requestId], permit)) _controlPermits.remove(requestId);
       }
     });
     return result.future;
@@ -201,6 +222,7 @@ class MediaKitPlayback extends ChangeNotifier {
     if (player == null || engineId != id || _releasing) return false;
     if (method == 'stop') return _release();
     if (_requestedId != id) return false;
+    if (_failure.isNotEmpty && method != 'pause') return false;
     final native = player.platform as NativePlayer;
     switch (method) {
       case 'play':
@@ -212,8 +234,16 @@ class MediaKitPlayback extends ChangeNotifier {
           return false;
         }
         break;
-      case 'rate': await player.setRate((args['value'] as num).toDouble()); break;
-      case 'volume': await player.setVolume((args['value'] as num).toDouble() * 100); break;
+      case 'rate':
+        final previousRate = player.state.rate;
+        await _applyControl(player, id, permit,
+          () => player.setRate((args['value'] as num).toDouble()), () => player.setRate(previousRate));
+        break;
+      case 'volume':
+        final previousVolume = player.state.volume;
+        await _applyControl(player, id, permit,
+          () => player.setVolume((args['value'] as num).toDouble() * 100), () => player.setVolume(previousVolume));
+        break;
       case 'seek':
         return _seek(player, id, (args['seconds'] as num).toDouble(),
             args['_seekIntent'] as int, permit);
@@ -230,7 +260,12 @@ class MediaKitPlayback extends ChangeNotifier {
           await player.setSubtitleTrack(trackId == 'no' ? SubtitleTrack.no() : tracks.first);
         } else { return false; }
         break;
-      case 'subtitle': await player.setSubtitleTrack(SubtitleTrack.uri(args['url'] as String)); break;
+      case 'subtitle':
+        final previousSubtitle = player.state.track.subtitle;
+        await _applyControl(player, id, permit,
+          () => player.setSubtitleTrack(SubtitleTrack.uri(args['url'] as String)),
+          () => player.setSubtitleTrack(previousSubtitle));
+        break;
       case 'pip':
         final handle = await player.handle;
         if (!_allows(permit, id, player)) return false;
@@ -321,9 +356,20 @@ class MediaKitPlayback extends ChangeNotifier {
         break;
       case 'loop':
         final start = (args['from'] as num).toDouble(), end = (args['to'] as num).toDouble();
-        await native.setProperty('ab-loop-b', 'no');
-        await native.setProperty('ab-loop-a', start >= 0 && end > start ? '$start' : 'no');
-        if (start >= 0 && end > start) await native.setProperty('ab-loop-b', '$end');
+        final previousA = await _property(native, 'ab-loop-a');
+        final previousB = await _property(native, 'ab-loop-b');
+        if (!_allows(permit, id, player) || previousA == null || previousB == null) return false;
+        await _applyControl(player, id, permit, () async {
+          await native.setProperty('ab-loop-b', 'no');
+          if (!_allows(permit, id, player)) throw StateError('Loop command expired');
+          await native.setProperty('ab-loop-a', start >= 0 && end > start ? '$start' : 'no');
+          if (!_allows(permit, id, player)) throw StateError('Loop command expired');
+          if (start >= 0 && end > start) await native.setProperty('ab-loop-b', '$end');
+        }, () async {
+          await native.setProperty('ab-loop-b', 'no');
+          await native.setProperty('ab-loop-a', previousA);
+          await native.setProperty('ab-loop-b', previousB);
+        });
         break;
       default: return false;
     }
@@ -335,6 +381,23 @@ class MediaKitPlayback extends ChangeNotifier {
   bool _allows(MediaKitCommandPermit permit, String id, [Player? player]) =>
       permit.isValid && !_disposed && _requestedId == id &&
       (player == null || _player == player);
+
+  Future<void> _applyControl(Player player, String id, MediaKitCommandPermit permit,
+      Future<void> Function() apply, Future<void> Function() restore) async {
+    try {
+      await apply();
+      if (!_allows(permit, id, player)) throw StateError('Control command expired');
+    } catch (_) {
+      if (_sameSession(player, id)) {
+        try { await restore(); }
+        catch (_) {
+          _failure = 'playback_control_failed';
+          await _publishFailure();
+        }
+      }
+      rethrow;
+    }
+  }
 
   bool _sameSession(Player player, String id) =>
       !_disposed && _requestedId == id && _player == player;

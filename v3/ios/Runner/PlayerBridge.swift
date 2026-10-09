@@ -21,7 +21,17 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   private var workToken: UUID?
   private var workWatchdog: DispatchWorkItem?
   private var workDidReply = false
+  private var openRequest = 0
   private var claimedMutationIDs: [String] = []
+  private var operationResults: [String: [String: Any]] = [:]
+  private var operationResultOrder: [String] = []
+  private func rememberOperation(_ id: String, success: Bool, code: String? = nil) {
+    var value: [String: Any] = ["operationId": id, "state": "completed", "success": success]
+    if let code { value["code"] = code }
+    operationResults[id] = value
+    operationResultOrder.append(id)
+    if operationResultOrder.count > 64 { operationResults.removeValue(forKey: operationResultOrder.removeFirst()) }
+  }
   private var scanToken: UUID?
   private var scanWatchdog: DispatchWorkItem?
   private var importBusy = false
@@ -59,6 +69,9 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       let timeout = DispatchWorkItem {
         guard !completed else { return }
         completed = true
+        if ["rate", "volume", "loop", "subtitle"].contains(method), arguments["requestId"] != nil {
+          self.mediaKitChannel.invokeMethod("invalidateControl", arguments: arguments)
+        }
         completion(false)
       }
       DispatchQueue.main.asyncAfter(deadline: .now() + timeoutSeconds, execute: timeout)
@@ -119,6 +132,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     playback.changed = { [weak self] state in self?.sink?(["type": "player", "state": state]) }
     playback.restoreRequested = { [weak self] in self?.sink?(["type": "openPlayer"]) }
     playback.notice = { [weak self] code in self?.sink?(["type": "notice", "code": code]) }
+    library.recordStore.changed = { [weak self] in self?.publishRecords() }
   }
 
   static func register(with registrar: FlutterPluginRegistrar) {
@@ -140,7 +154,12 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   }
 
   func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-    sink = events; playback.publish(); return nil
+    sink = events; playback.publish(); publishRecords(); return nil
+  }
+  private func publishRecords() {
+    var state = library.recordStore.state
+    state["type"] = "records"
+    sink?(state)
   }
   func onCancel(withArguments arguments: Any?) -> FlutterError? { sink = nil; return nil }
 
@@ -207,6 +226,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
           self.workWatchdog?.cancel(); self.workWatchdog = nil
           self.workToken = nil; self.busy = false
           completion?(value)
+          self.rememberOperation(operationID, success: true)
           if self.workDidReply {
             self.sink?(["type": "operation", "operationId": operationID,
               "state": "completed", "success": true])
@@ -218,8 +238,14 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       } catch {
         DispatchQueue.main.async {
           guard self.workToken == token else { return }
+          if let failure = error as? LibraryFailure {
+            if let movedPath = failure.args["movedPath"] as? String { completion?(movedPath) }
+            else if failure.args["fileChanged"] as? Bool == true { completion?(nil) }
+          }
           self.workWatchdog?.cancel(); self.workWatchdog = nil
           self.workToken = nil; self.busy = false
+          self.rememberOperation(operationID, success: false,
+            code: (error as? LibraryFailure)?.code ?? "operation_failed")
           if self.workDidReply {
             self.sink?(["type": "operation", "operationId": operationID,
               "state": "completed", "success": false,
@@ -274,9 +300,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
           guard self.scanToken == token else { return }
           self.scanWatchdog?.cancel(); self.scanWatchdog = nil
           self.scanToken = nil
-          if !warnings.isEmpty {
-            self.sink?(["type": "scanWarning", "warnings": warnings])
-          }
+          self.sink?(["type": "scanWarning", "warnings": warnings])
           if !protectionPaths.isEmpty {
             self.library.scheduleProtectionNormalization(paths: protectionPaths)
           }
@@ -407,7 +431,12 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
           let snapshot = try self.library.scanSnapshot()
           return (snapshot.items, snapshot.warnings, snapshot.protectionPaths)
         }; return
-      case "records": result(library.records); return
+      case "records":
+        result(library.recordStore.state); return
+      case "retryRecords": library.recordStore.retryStorage(); result(nil); return
+      case "operationStatus":
+        let ids = args["ids"] as? [String] ?? []
+        result(ids.compactMap { operationResults[$0] }); return
       case "state": result(playback.snapshot()); return
       case "playbackInfo": result(playback.playbackInfo()); return
       case "import":
@@ -447,7 +476,6 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         perform(result, operationID: args["operationId"] as? String, mutation: true,
           operation: { try self.library.move(path: path, parent: parent, name: name) }, completion: { value in
           if let new = value as? String {
-            self.library.remapRecords(from: path, to: new)
             self.playback.remapQueuePath(from: path, to: new)
           }
         }); return
@@ -471,27 +499,51 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       case "favorite":
         let path = args["path"] as? String ?? ""
         _ = try library.url(path)
-        var record = library.records[path] ?? [:]
-        record["favorite"] = args["value"] as? Bool ?? false
-        library.records[path] = record; library.save()
+        let value = args["value"] as? Bool ?? false
+        perform(result, operationID: args["operationId"] as? String, mutation: true, operation: {
+          try self.library.recordStore.mutate { $0[path, default: [:]]["favorite"] = value }
+          return nil
+        }); return
       case "clearHistory":
-        for path in Array(library.records.keys) {
-          library.records[path]?.removeValue(forKey: "lastPlayed")
-          library.records[path]?.removeValue(forKey: "position")
-          library.records[path]?.removeValue(forKey: "completed")
-        }
-        library.save()
+        perform(result, operationID: args["operationId"] as? String, mutation: true, operation: {
+          try self.library.recordStore.mutate { records in
+            for path in Array(records.keys) {
+              records[path]?.removeValue(forKey: "lastPlayed")
+              records[path]?.removeValue(forKey: "position")
+              records[path]?.removeValue(forKey: "completed")
+            }
+          }
+          return nil
+        }); return
       case "open":
-        try playback.open(paths: args["paths"] as? [String] ?? [], selected: args["index"] as? Int ?? 0, resume: args["resume"] as? Bool ?? true)
-      case "play": playback.play()
-      case "pause": playback.pause()
+        openRequest += 1
+        let requested = openRequest
+        let deadline = ProcessInfo.processInfo.systemUptime + 27
+        library.recordStore.afterInitialLoad {
+          guard self.openRequest == requested else {
+            result(self.failure(LibraryFailure.app("control_superseded"))); return
+          }
+          guard ProcessInfo.processInfo.systemUptime < deadline else {
+            result(self.failure(LibraryFailure.app("open_timeout"))); return
+          }
+          do {
+            try self.playback.open(paths: args["paths"] as? [String] ?? [], selected: args["index"] as? Int ?? 0, resume: args["resume"] as? Bool ?? true)
+            result(self.playback.snapshot())
+          } catch { result(self.failure(error)) }
+        }; return
+      case "play": playback.play(); result(playback.snapshot()); return
+      case "pause": playback.pause(); result(playback.snapshot()); return
       case "seek":
         playback.seek(args["seconds"] as? Double ?? 0) { finished in result(finished) }; return
       case "previewSeek": playback.previewSeek(args["seconds"] as? Double ?? 0)
       case "cancelScrub": playback.cancelScrub()
       case "next": playback.skip(1)
       case "previous": playback.skip(-1)
-      case "configure": try playback.configure(args)
+      case "configure":
+        playback.requestConfiguration(args) { code in
+          if let code { result(FlutterError(code: code, message: nil, details: nil)) }
+          else { result(self.playback.snapshot()) }
+        }; return
       case "track":
         guard let session = args["generation"] as? Int, let kind = args["kind"] as? String,
           let index = args["index"] as? Int else { throw LibraryFailure.app("track_selection_stale") }
@@ -500,7 +552,11 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
           else { result(true) }
         }
         return
-      case "subtitle": try playback.loadSubtitle(path: args["path"] as? String ?? "")
+      case "subtitle":
+        playback.requestSubtitle(path: args["path"] as? String ?? "") { code in
+          if let code { result(FlutterError(code: code, message: nil, details: nil)) }
+          else { result(self.playback.snapshot()) }
+        }; return
       case "restoreBrightness": playback.restoreBrightness()
       case "pipRestored":
         if pipRestoreToken == nil, args["restoreToken"] == nil {
@@ -575,14 +631,20 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       if self.backgroundTask != .invalid { UIApplication.shared.endBackgroundTask(self.backgroundTask); self.backgroundTask = .invalid }
     }
     performImport(callback, token: token, operation: {
-      let paths = try self.library.importFiles(urls, parent: parent, cancellation: cancellation) { name, done, total in
+      var skippedCount = 0
+      var warnings: [[String: Any]] = []
+      let paths = try self.library.importFiles(urls, parent: parent, cancellation: cancellation, skipped: { path in
+        skippedCount += 1
+        if warnings.count < 50 { warnings.append(["code": "symbolic_link_unsupported", "path": path]) }
+      }) { name, done, total in
         DispatchQueue.main.async {
           guard self.importToken == token else { return }
           self.touchImportWatchdog(token)
           self.sink?(["type": "import", "name": name, "done": done, "total": total])
         }
       }
-      return ["count": paths.count, "paths": paths] as [String: Any]
+      return ["count": paths.count, "paths": paths, "skippedCount": skippedCount,
+        "warnings": warnings, "partial": skippedCount > 0] as [String: Any]
     })
   }
 

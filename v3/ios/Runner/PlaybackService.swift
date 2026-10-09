@@ -30,8 +30,14 @@ final class LeeMediaKitEngine {
   private(set) var seekable = false
   private(set) var failure = ""
   private(set) var trackState: [String: Any] = [:]
-  var rate: Float = 1 { didSet { if opened && rate != oldValue { send("rate", ["value": Double(rate)]) } } }
-  var volume: Float = 1 { didSet { if opened && volume != oldValue { send("volume", ["value": Double(volume)]) } } }
+  var rate: Float = 1
+  var volume: Float = 1
+  func control(_ method: String, arguments: [String: Any], completion: @escaping (Bool) -> Void) {
+    guard !stopped, ready else { completion(false); return }
+    var values = arguments
+    values["requestId"] = UUID().uuidString
+    send(method, values, completion: completion)
+  }
 
   init(transport: @escaping (String, [String: Any], @escaping (Bool) -> Void) -> Void) {
     self.transport = transport
@@ -97,16 +103,6 @@ final class LeeMediaKitEngine {
     guard let row = rows.first(where: { ($0["index"] as? NSNumber)?.intValue == index }),
       let trackID = row["id"] as? String else { return false }
     return select(kind: kind, trackID: trackID)
-  }
-
-  func addSubtitle(url: URL) -> Bool {
-    guard !stopped, ready else { return false }
-    send("subtitle", ["url": url.absoluteString]); return true
-  }
-
-  func setLoop(from: Double, to: Double) -> Bool {
-    guard !stopped, ready, seekable else { return false }
-    send("loop", ["from": from, "to": to]); return true
   }
 
   func startPiP(requestID: String, completion: @escaping (Bool) -> Void) {
@@ -456,9 +452,11 @@ final class PlaybackService: NSObject {
     for (command, target) in remoteTargets { command.removeTarget(target) }
   }
 
+  private var stateRevision = 0
   func snapshot() -> [String: Any] {
     let mediaKitTracks = mediaKit?.trackState ?? [:]
     return ["path": currentPath ?? "", "queue": queue, "index": index, "generation": generation,
+      "revision": stateRevision, "wantsPlayback": wantsPlayback,
       "trackSelecting": trackSelection != nil, "engineId": mediaKit?.id ?? "",
       "playing": enginePlaying, "loading": loading || isSeeking || (mediaKit?.buffering ?? (player.timeControlStatus == .waitingToPlayAtSpecifiedRate)),
       "seeking": isSeeking, "scrubbing": scrubbing, "isAudio": mediaIsAudio,
@@ -481,6 +479,7 @@ final class PlaybackService: NSObject {
   }
 
   func publish() {
+    stateRevision += 1
     UIApplication.shared.isIdleTimerDisabled = !mediaIsAudio && enginePlaying && UIApplication.shared.applicationState == .active
     changed?(snapshot())
     updateNowPlaying()
@@ -646,15 +645,13 @@ final class PlaybackService: NSObject {
         self.timelineReady = true
         self.loadTracks(item)
         // Old records used the source movie clock. Convert once, including pauses inside its empty edit.
-        var record = self.library.records[path] ?? [:]
+        let record = self.library.recordStore.snapshot[path] ?? [:]
         let previousOrigin = (record["timelineOrigin"] as? NSNumber)?.doubleValue ?? 0
         let saved = (record["position"] as? NSNumber)?.doubleValue ?? 0
         let migrated = saved.isFinite ? max(0, saved + previousOrigin - origin) : 0
         if self.rememberProgress {
-          record["position"] = migrated
-          record["duration"] = self.duration
-          record["timelineOrigin"] = origin
-          self.library.records[path] = record; self.library.save()
+          self.library.recordStore.updateProgress(path: path,
+            fields: ["position": migrated, "duration": self.duration, "timelineOrigin": origin])
         }
         let start = self.rememberProgress && resume && migrated > 0 && migrated < self.duration - 2 ? migrated : 0
         self.prepareStart(url: url, saved: start)
@@ -955,12 +952,10 @@ final class PlaybackService: NSObject {
   private func ended() {
     guard wantsPlayback else { return }
     if let path = currentPath {
-      var record = library.records[path] ?? [:]
       if rememberProgress {
-        record["position"] = 0.0; record["completed"] = true
-        record["duration"] = duration; record["timelineOrigin"] = timelineOrigin
+        library.recordStore.updateProgress(path: path, fields: ["position": 0.0,
+          "completed": true, "duration": duration, "timelineOrigin": timelineOrigin])
       }
-      library.records[path] = record; library.save()
     }
     if let a = aPoint, bPoint != nil { seek(a); return }
     if !continuous { wantsPlayback = false; pauseEngine(); publish(); return }
@@ -978,7 +973,84 @@ final class PlaybackService: NSObject {
     min(300, max(1, value))
   }
 
-  func configure(_ values: [String: Any]) throws {
+  private var controlBusy = false
+
+  func requestConfiguration(_ values: [String: Any], completion: @escaping (String?) -> Void) {
+    if let requested = values["generation"] as? Int, requested != generation {
+      completion("control_superseded"); return
+    }
+    guard let engine = mediaKit else {
+      do { try configure(values); completion(nil) }
+      catch { completion((error as? LibraryFailure)?.code ?? "playback_control_failed") }
+      return
+    }
+    guard !controlBusy else { completion("playback_control_failed"); return }
+    let token = generation
+    var commands: [(String, [String: Any], () -> Void)] = []
+    var remaining = values
+    if let value = values["rate"] as? Double, value.isFinite {
+      let rate = Self.normalizedRate(value)
+      remaining.removeValue(forKey: "rate")
+      commands.append(("rate", ["value": Double(rate)], { [weak self] in
+        self?.rate = rate; engine.rate = rate
+        UserDefaults.standard.set(rate, forKey: "playback.rate")
+      }))
+    }
+    if let value = values["volume"] as? Double, value.isFinite {
+      let volume = Float(min(1, max(0, value)))
+      remaining.removeValue(forKey: "volume")
+      commands.append(("volume", ["value": Double(volume)], { [weak self] in
+        self?.mediaVolume = volume; engine.volume = volume
+        UserDefaults.standard.set(volume, forKey: "playback.volume")
+      }))
+    }
+    if let action = values["ab"] as? String {
+      remaining.removeValue(forKey: "ab")
+      var a: Double?, b: Double?
+      if action == "a" { a = position }
+      else if action == "b" {
+        guard let start = aPoint, position > start + 0.5 else { completion("ab_repeat_invalid"); return }
+        a = start; b = position
+      }
+      guard engine.seekable else { completion("ab_repeat_unsupported"); return }
+      let nextA = a, nextB = b
+      commands.append(("loop", ["from": a ?? -1, "to": b ?? -1], { [weak self] in
+        self?.aPoint = nextA; self?.bPoint = nextB
+        if let start = nextA, nextB != nil { self?.seek(start) }
+      }))
+    }
+    guard !commands.isEmpty else {
+      do { try configure(remaining); completion(nil) }
+      catch { completion((error as? LibraryFailure)?.code ?? "playback_control_failed") }
+      return
+    }
+    controlBusy = true
+    func run(_ index: Int) {
+      guard generation == token, mediaKit === engine else {
+        controlBusy = false; completion("control_superseded"); return
+      }
+      guard index < commands.count else {
+        controlBusy = false
+        do { try configure(remaining); completion(nil) }
+        catch { completion((error as? LibraryFailure)?.code ?? "playback_control_failed") }
+        return
+      }
+      let command = commands[index]
+      engine.control(command.0, arguments: command.1) { [weak self] success in
+        guard let self else { completion("control_superseded"); return }
+        guard self.generation == token, self.mediaKit === engine else {
+          self.controlBusy = false; completion("control_superseded"); return
+        }
+        guard success else {
+          self.controlBusy = false; self.publish(); completion("playback_control_failed"); return
+        }
+        command.2(); self.publish(); run(index + 1)
+      }
+    }
+    run(0)
+  }
+
+  private func configure(_ values: [String: Any]) throws {
     if let value = values["rememberProgress"] as? Bool {
       rememberProgress = value
       UserDefaults.standard.set(value, forKey: "playback.rememberProgress")
@@ -1063,6 +1135,32 @@ final class PlaybackService: NSObject {
     if let value = savedBrightness { UIScreen.main.brightness = value; savedBrightness = nil }
   }
 
+  func requestSubtitle(path: String, completion: @escaping (String?) -> Void) {
+    guard let engine = mediaKit else {
+      do { try loadSubtitle(path: path); completion(nil) }
+      catch { completion((error as? LibraryFailure)?.code ?? "subtitle_load_failed") }
+      return
+    }
+    guard !controlBusy, trackSelection == nil else { completion("subtitle_switch_busy"); return }
+    do {
+      let url = try library.url(path)
+      let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+      guard size <= 10 * 1024 * 1024 else { throw LibraryFailure.app("subtitle_too_large") }
+      controlBusy = true
+      let token = generation
+      engine.control("subtitle", arguments: ["url": url.absoluteString]) { [weak self] success in
+        guard let self else { completion("control_superseded"); return }
+        self.controlBusy = false
+        guard self.generation == token, self.mediaKit === engine else { completion("control_superseded"); return }
+        if success {
+          self.cues = []; self.subtitleName = url.lastPathComponent
+          self.surface?.caption.isHidden = true; self.publish()
+        }
+        completion(success ? nil : "subtitle_load_failed")
+      }
+    } catch { completion((error as? LibraryFailure)?.code ?? "subtitle_load_failed") }
+  }
+
   func attachSurface(_ view: PlayerSurface) {
     surface = view
     view.onLayout = nil
@@ -1093,14 +1191,16 @@ final class PlaybackService: NSObject {
 
   func persist() {
     guard timelineReady, !detectingIntro, !loading, !isSeeking, !scrubbing, let path = currentPath else { return }
-    var record = library.records[path] ?? [:]
+    var record: [String: Any] = [:]
     if rememberProgress {
       record["position"] = duration > 0 && position >= duration - 0.5 ? 0.0 : position
       record["duration"] = duration
       record["timelineOrigin"] = timelineOrigin
     }
     record["lastPlayed"] = Date().timeIntervalSince1970
-    library.records[path] = record; library.save(); lastSave = Date()
+    library.recordStore.updateProgress(path: path, fields: record)
+    // Submission throttle only; the store tracks dirty data and retries failed commits.
+    lastSave = Date()
   }
 
   private func fail(_ message: String) {
@@ -1329,16 +1429,13 @@ final class PlaybackService: NSObject {
     publish()
   }
 
-  func loadSubtitle(path: String) throws {
+  private func loadSubtitle(path: String) throws {
     guard trackSelection == nil else { throw LibraryFailure.app("subtitle_switch_busy") }
     let url = try library.url(path)
     library.scheduleProtectionNormalization(paths: [path])
     let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
     guard size <= 10 * 1024 * 1024 else { throw LibraryFailure.app("subtitle_too_large") }
-    if let mediaKit = mediaKit {
-      guard mediaKit.addSubtitle(url: url) else { throw LibraryFailure.app("subtitle_load_failed") }
-      cues = []; subtitleName = url.lastPathComponent; surface?.caption.isHidden = true; publish(); return
-    }
+    guard mediaKit == nil else { throw LibraryFailure.app("subtitle_load_failed") }
     guard ["srt", "vtt"].contains(url.pathExtension.lowercased()) else {
       throw LibraryFailure.app("subtitle_format_unsupported")
     }
@@ -1467,14 +1564,14 @@ final class PlaybackService: NSObject {
     }
     if engine.ready && engine.duration > 0 && !preparedMediaKit {
       preparedMediaKit = true; timelineReady = true; openingTimeout?.cancel()
-      var record = library.records[currentPath ?? ""] ?? [:]
+      let record = library.recordStore.snapshot[currentPath ?? ""] ?? [:]
       let saved = (record["position"] as? NSNumber)?.doubleValue ?? 0
       let previousOrigin = (record["timelineOrigin"] as? NSNumber)?.doubleValue ?? 0
       let sourceTime = saved + previousOrigin
       let start = rememberProgress && pendingResume && sourceTime.isFinite && sourceTime > 0 && sourceTime < duration - 2 ? sourceTime : 0
       if rememberProgress, let path = currentPath {
-        record["position"] = start; record["duration"] = duration; record["timelineOrigin"] = 0.0
-        library.records[path] = record; library.save()
+        library.recordStore.updateProgress(path: path,
+          fields: ["position": start, "duration": duration, "timelineOrigin": 0.0])
       }
       loading = false
       if engine.seekable {
@@ -1798,11 +1895,7 @@ final class PlaybackService: NSObject {
 
   private func updateLoop() {
     clearBoundary()
-    if let mediaKit = mediaKit {
-      let success = mediaKit.setLoop(from: aPoint ?? -1, to: bPoint ?? -1)
-      if !success && bPoint != nil { errorMessage = "ab_repeat_unsupported"; aPoint = nil; bPoint = nil }
-      return
-    }
+    guard mediaKit == nil else { return } // media_kit commits through requestConfiguration.
     guard let a = aPoint, let b = bPoint else { return }
     let token = generation
     boundaryObserver = player.addBoundaryTimeObserver(forTimes: [NSValue(time: CMTime(seconds: b, preferredTimescale: 600))], queue: .main) { [weak self] in

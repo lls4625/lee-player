@@ -15,6 +15,8 @@ private actor TipLedger {
   struct Request: Codable, Sendable {
     var productId: String
     var status: String
+    var created: Double?
+    var purchaseToken: UUID?
   }
   private struct Document: Codable {
     var version = 1
@@ -97,10 +99,11 @@ private actor TipLedger {
     return document
   }
 
-  func acceptRequest(_ id: String, product: String) throws -> Bool {
+  func acceptRequest(_ id: String, product: String, token: UUID) throws -> Bool {
     var next = try current()
     if next.requests[id] != nil { return false }
-    next.requests[id] = Request(productId: product, status: "purchasing")
+    next.requests[id] = Request(productId: product, status: "purchasing",
+      created: Date().timeIntervalSince1970, purchaseToken: token)
     try save(next)
     return true
   }
@@ -121,7 +124,7 @@ private actor TipLedger {
   }
 
   func record(_ id: String, product: String, page: String?, revoked: Bool,
-              request: String?) throws {
+              request: String?, purchaseToken: UUID?) throws {
     var next = try current()
     if next.transactions[id] == nil {
       next.transactions[id] = Entry(productId: product,
@@ -129,18 +132,25 @@ private actor TipLedger {
         presentation: revoked ? "suppressed" : "pending", page: page)
     }
     if revoked { next.transactions[id]?.presentation = "suppressed" }
-    if let request { next.transactions[id]?.requestId = request }
-    let associatedRequest = request ?? next.transactions[id]?.requestId
+    let candidates = next.requests.filter {
+      purchaseToken != nil && $0.value.purchaseToken == purchaseToken && $0.value.productId == product
+    }
+    let tokenRequest = candidates.count == 1 ? candidates.first?.key : nil
+    let proposedRequest = request ?? tokenRequest
+    // Never reassign an already-associated transaction or let one request
+    // consume two different transactions, including duplicate update delivery.
+    if next.transactions[id]?.requestId == nil, let proposedRequest,
+      next.requests[proposedRequest]?.productId == product,
+      !next.transactions.contains(where: { $0.key != id && $0.value.requestId == proposedRequest }) {
+      next.transactions[id]?.requestId = proposedRequest
+    }
+    let associatedRequest = next.transactions[id]?.requestId
     if let associatedRequest {
       next.requests[associatedRequest]?.status =
         next.transactions[id]?.presentation == "suppressed" ? "unresolved" : "succeeded"
     }
-    if associatedRequest == nil && !revoked {
-      for key in Array(next.requests.keys) where next.requests[key]?.status == "awaitingApproval"
-        && next.requests[key]?.productId == product {
-        next.requests[key]?.status = "unresolved"
-      }
-    }
+    // Legacy requests have no token. Do not guess from product/time or rewrite
+    // all pending requests when an unrelated transaction arrives.
     try save(next)
   }
 
@@ -297,7 +307,7 @@ final class DeveloperTipPurchase {
       let visiblePage = !recovery && UIApplication.shared.applicationState != .background ? pageToken : nil
       do {
         try await ledger.record(String(transaction.id), product: transaction.productID,
-          page: visiblePage, revoked: revoked, request: request)
+          page: visiblePage, revoked: revoked, request: request, purchaseToken: transaction.appAccountToken)
         try await refreshRequests()
         storage = "healthy"
         verificationPending = false
@@ -321,6 +331,14 @@ final class DeveloperTipPurchase {
   }
 
   private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) async {
+    var paymentStarted = false
+    let callRequest = (call.arguments as? [String: Any])?["requestId"] as? String
+    func purchaseFailure(_ code: String) -> FlutterError {
+      FlutterError(code: code, message: nil, details: [
+        "paymentStarted": paymentStarted, "phase": paymentStarted ? "storeKit" : "preflight",
+        "requestId": callRequest ?? "",
+      ])
+    }
     do {
       switch call.method {
       case "refresh":
@@ -379,27 +397,28 @@ final class DeveloperTipPurchase {
         result(snapshot())
       case "purchase":
         guard storage == "healthy", !operationInProgress else {
-          result(FlutterError(code: storage == "healthy" ? "purchase_busy" : "tip_storage_error",
-            message: nil, details: nil)); return
+          result(purchaseFailure(storage == "healthy" ? "purchase_busy" : "tip_storage_error")); return
         }
         guard let args = call.arguments as? [String: Any],
           let id = args["productId"] as? String, let request = args["requestId"] as? String,
           let product = products[id], !request.isEmpty else {
-          result(FlutterError(code: "purchase_product_invalid", message: nil, details: nil)); return
+          result(purchaseFailure("purchase_product_invalid")); return
         }
         guard AppStore.canMakePayments else {
-          result(FlutterError(code: "purchase_restricted", message: nil, details: nil)); return
+          result(purchaseFailure("purchase_restricted")); return
         }
         operationInProgress = true
         publish()
         defer { operationInProgress = false; publish() }
-        guard try await ledger.acceptRequest(request, product: id) else {
+        let purchaseToken = UUID()
+        guard try await ledger.acceptRequest(request, product: id, token: purchaseToken) else {
           result(snapshot()); return
         }
         try await refreshRequests()
         var outcome = "unresolved"
         do {
-          switch try await product.purchase() {
+          paymentStarted = true
+          switch try await product.purchase(options: [.appAccountToken(purchaseToken)]) {
           case .success(let verification):
             await receive(verification, request: request)
             outcome = requests[request]?.status == "succeeded" ? "succeeded" : "unresolved"
@@ -421,8 +440,15 @@ final class DeveloperTipPurchase {
       default: result(FlutterMethodNotImplemented)
       }
     } catch {
+      if call.method == "purchase", !paymentStarted, let callRequest {
+        // Best effort: the accepted request must not remain purchasing if we
+        // know StoreKit was never invoked. Failure to persist keeps it uncertain.
+        try? await ledger.requestResult(callRequest, status: "failed")
+        try? await refreshRequests()
+      }
       storageFailure(error)
-      result(FlutterError(code: "tip_storage_error", message: nil, details: nil))
+      result(call.method == "purchase" ? purchaseFailure("tip_storage_error") :
+        FlutterError(code: "tip_storage_error", message: nil, details: nil))
     }
   }
 

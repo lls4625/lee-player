@@ -142,9 +142,6 @@ class AppLocalizations {
         : message.code;
     final template = _appMessages[messageCode]?[code];
     if (template == null) {
-      final fallback = message.fallback;
-      if (code == 'zh-Hans' && fallback != null && fallback.isNotEmpty)
-        return fallback;
       return _appMessages['operation_failed']![code]!;
     }
     var value = template;
@@ -303,6 +300,55 @@ class AppLocalizations {
   }
 
   static const Map<String, Map<String, String>> _appMessages = {
+    'library_records_unavailable': {
+      'zh-Hans': '记录暂时无法保存，播放进度和更改可能不会保留。',
+      'zh-Hant': '記錄暫時無法儲存，播放進度和變更可能不會保留。',
+      'ja': '現在、記録を保存できません。再生位置や変更が保存されない場合があります。',
+      'en': 'Records cannot be saved right now. Playback progress and changes may not be retained.',
+    },
+    'library_records_corrupt': {
+      'zh-Hans': '记录文件无法读取，已保留原文件。可继续播放，但暂时无法保存记录。',
+      'zh-Hant': '記錄檔案無法讀取，已保留原檔案。可繼續播放，但暫時無法儲存記錄。',
+      'ja': '記録ファイルを読み込めません。元のファイルは保持されています。再生はできますが、記録は保存できません。',
+      'en': 'The records file cannot be read. The original is preserved. Playback is available, but records cannot be saved.',
+    },
+    'library_records_version': {
+      'zh-Hans': '此版本无法读取记录格式，已保留原文件。请使用兼容的应用版本。',
+      'zh-Hant': '此版本無法讀取記錄格式，已保留原檔案。請使用相容的應用程式版本。',
+      'ja': 'この記録形式には対応していません。元のファイルは保持されています。対応するアプリのバージョンをご利用ください。',
+      'en': 'This records format is not supported. The original file is preserved. Use a compatible app version.',
+    },
+    'library_records_recovery': {
+      'zh-Hans': '文件操作尚待核对，部分更改可能已完成。请重新核对后再操作。',
+      'zh-Hant': '檔案操作尚待核對，部分變更可能已完成。請重新核對後再操作。',
+      'ja': 'ファイル操作の確認が必要です。一部の変更は完了している可能性があります。再確認してから操作してください。',
+      'en': 'The file operation needs reconciliation. Some changes may already be complete. Recheck before trying again.',
+    },
+    'library_records_loading': {
+      'zh-Hans': '记录正在加载，请稍后重试。', 'zh-Hant': '記錄正在載入，請稍後重試。',
+      'ja': '記録を読み込み中です。しばらくしてから再試行してください。', 'en': 'Records are loading. Please try again shortly.',
+    },
+    'library_records_retry': {
+      'zh-Hans': '重新核对记录', 'zh-Hant': '重新核對記錄', 'ja': '記録を再確認', 'en': 'Recheck records',
+    },
+    'import_skipped_items': {
+      'zh-Hans': '导入部分完成：已跳过 {count} 个符号链接，原文件未改动。',
+      'zh-Hant': '匯入部分完成：已略過 {count} 個符號連結，原檔案未變更。',
+      'ja': '一部の項目を取り込みました。シンボリックリンク {count} 件をスキップしました。元のファイルは変更されていません。',
+      'en': 'Import partially completed: skipped {count} symbolic links. The original files were not changed.',
+    },
+    'import_skipped_details': {
+      'zh-Hans': '查看跳过的符号链接', 'zh-Hant': '查看略過的符號連結',
+      'ja': 'スキップしたシンボリックリンクを表示', 'en': 'View skipped symbolic links',
+    },
+    'import_skipped_limit': {
+      'zh-Hans': '仅列出前 {count} 项。', 'zh-Hant': '僅列出前 {count} 項。',
+      'ja': '最初の {count} 件を表示しています。', 'en': 'Showing the first {count} items.',
+    },
+    'playback_control_failed': {
+      'zh-Hans': '播放设置未能确认，请稍后重试。', 'zh-Hant': '播放設定未能確認，請稍後重試。',
+      'ja': '再生設定を確認できませんでした。しばらくしてから再試行してください。', 'en': 'The playback setting could not be confirmed. Please try again shortly.',
+    },
     'operation_failed': {
       'zh-Hans': '操作失败，请重试',
       'zh-Hant': '操作失敗，請再試一次',

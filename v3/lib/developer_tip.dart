@@ -373,13 +373,21 @@ class DeveloperTipController extends ChangeNotifier with WidgetsBindingObserver 
       if (_disposed) return;
       applyNativeState(value);
       _transportUnknown = false;
-      if (value is Map && value['outcome'] == 'cancelled') {
-        _operationMessage = const AppMessage('purchase_cancelled');
+    } catch (error) {
+      final details = error is PlatformException ? error.details : null;
+      final preflight = error is PlatformException && (
+        const {'purchase_busy', 'purchase_product_invalid', 'purchase_restricted'}.contains(error.code) ||
+        details is Map && details['paymentStarted'] == false && details['requestId'] == requestId);
+      if (preflight && error is PlatformException) {
+        _transportUnknown = false;
+        _requestOutcome = 'failed';
+        if (error.code != 'purchase_busy') _record(error);
+        if (error.code == 'tip_storage_error') unawaited(reconcile());
+      } else {
+        _transportUnknown = true;
+        _resolveTransportUncertainty();
+        unawaited(reconcile());
       }
-    } catch (_) {
-      _transportUnknown = true;
-      _resolveTransportUncertainty();
-      unawaited(reconcile());
     } finally {
       _calling = false;
       _processingProductId = null;
@@ -659,13 +667,13 @@ class _TipProducts extends StatelessWidget {
                   final accepted = await showDialog<bool>(
                     context: context,
                     builder: (context) => AlertDialog(
-                      title: Text(localizations.message(const AppMessage('tip_buy_again'))),
-                      content: Text(localizations.message(const AppMessage('tip_buy_again_warning'))),
+                      title: Text(AppLocalizations.of(context).message(const AppMessage('tip_buy_again'))),
+                      content: Text(AppLocalizations.of(context).message(const AppMessage('tip_buy_again_warning'))),
                       actions: [
                         TextButton(onPressed: () => Navigator.pop(context, false),
-                          child: Text(localizations.text('取消'))),
+                          child: Text(AppLocalizations.of(context).text('取消'))),
                         TextButton(onPressed: () => Navigator.pop(context, true),
-                          child: Text(localizations.message(const AppMessage('tip_buy_again')))),
+                          child: Text(AppLocalizations.of(context).message(const AppMessage('tip_buy_again')))),
                       ],
                     ),
                   );

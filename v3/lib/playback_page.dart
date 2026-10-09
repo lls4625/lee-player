@@ -698,7 +698,6 @@ class _PlaybackPageState extends State<PlaybackPage> {
         GlassDialogAction(label: '复制信息', onPressed: () async {
           try {
             await Clipboard.setData(ClipboardData(text: text));
-            if (mounted) showLeiToast(context, '已复制完整播放信息');
           } catch (_) {
             if (mounted) showLeiToast(context, '复制失败，请重试');
           }

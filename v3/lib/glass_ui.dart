@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
@@ -482,26 +483,36 @@ class LeiGlassMenu extends StatelessWidget {
 }
 
 void showLeiToast(BuildContext context, String message) {
-  GlassToast.show(
-    context,
-    message: AppLocalizations.of(context).text(message),
-    type: GlassToastType.info,
-    quality: GlassQuality.minimal,
-    position: GlassToastPosition.top,
-    duration: const Duration(seconds: 4),
-  );
+  _showLocalizedToast(context, (context) => AppLocalizations.of(context).text(message));
 }
 
 void showLeiMessageToast(BuildContext context, AppMessage message) {
-  GlassToast.show(
-    context,
-    message: AppLocalizations.of(context).message(message),
-    type: GlassToastType.info,
-    quality: GlassQuality.minimal,
-    position: GlassToastPosition.top,
-    duration: const Duration(seconds: 4),
-  );
+  _showLocalizedToast(context, (context) => AppLocalizations.of(context).message(message));
 }
+
+void _showLocalizedToast(BuildContext context, String Function(BuildContext) text) {
+  _messageToast?.remove();
+  _messageToast?.dispose();
+  _messageToastTimer?.cancel();
+  final entry = OverlayEntry(builder: (context) => Positioned(
+    top: MediaQuery.paddingOf(context).top + 12,
+    left: 20, right: 20,
+    child: IgnorePointer(child: Material(
+      color: Colors.transparent,
+      child: LeiSurface(child: Text(
+        text(context), textAlign: TextAlign.center,
+      )),
+    )),
+  ));
+  _messageToast = entry;
+  Overlay.of(context, rootOverlay: true).insert(entry);
+  _messageToastTimer = Timer(const Duration(seconds: 4), () {
+    if (identical(_messageToast, entry)) { entry.remove(); entry.dispose(); _messageToast = null; }
+  });
+}
+
+OverlayEntry? _messageToast;
+Timer? _messageToastTimer;
 
 Future<T?> showLeiSheet<T>({
   required BuildContext context,
