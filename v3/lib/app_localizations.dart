@@ -779,6 +779,43 @@ class AppLocalizations {
       'ja': '現在、開発者支援を利用できません',
       'en': 'Tips are temporarily unavailable. Try again later.',
     },
+    'tip_storage_error': {
+      'zh-Hans': '打赏记录暂时无法保存，已暂停新的购买。请重新核对；已有支付不会自动重试。',
+      'zh-Hant': '贊助記錄暫時無法儲存，已暫停新的購買。請重新核對；既有付款不會自動重試。',
+      'ja': '支援記録を保存できないため、新しい購入を停止しています。状況を再確認してください。支払いは自動で再実行されません。',
+      'en': 'Tip records cannot be saved. New purchases are paused. Check again; payments will not be retried automatically.',
+    },
+    'tip_storage_corrupt': {
+      'zh-Hans': '打赏记录无法安全读取，已暂停购买。请勿卸载或清空数据；可联系用户支持 QQ 群：1126527885。',
+      'zh-Hant': '贊助記錄無法安全讀取，已暫停購買。請勿解除安裝或清除資料；可聯絡使用者支援 QQ 群：1126527885。',
+      'ja': '支援記録を安全に読み込めないため、購入を停止しています。アプリやデータを削除せず、サポート QQ グループ 1126527885 にお問い合わせください。',
+      'en': 'Tip records cannot be read safely. Purchases are paused. Do not uninstall or clear data. Contact support: QQ group 1126527885.',
+    },
+    'tip_unresolved': {
+      'zh-Hans': '支付结果或请求关联仍待确认。请先重新核对；再次购买可能产生另一笔付款。',
+      'zh-Hant': '付款結果或請求關聯仍待確認。請先重新核對；再次購買可能產生另一筆付款。',
+      'ja': '支払い結果または購入との対応を確認中です。まず再確認してください。再購入すると別の支払いが発生する場合があります。',
+      'en': 'The payment result or request association is unconfirmed. Check again first. Buying again may create another payment.',
+    },
+    'tip_reconcile': {
+      'zh-Hans': '重新核对', 'zh-Hant': '重新核對', 'ja': '状況を再確認', 'en': 'Check again',
+    },
+    'tip_checking': {
+      'zh-Hans': '正在核对…', 'zh-Hant': '正在核對…', 'ja': '確認中…', 'en': 'Checking…',
+    },
+    'tip_buy_again': {
+      'zh-Hans': '再次购买', 'zh-Hant': '再次購買', 'ja': 'もう一度購入', 'en': 'Buy again',
+    },
+    'tip_buy_again_warning': {
+      'zh-Hans': '之前的请求仍可能完成付款。本次将发起新的购买，可能产生另一笔付款。确定继续吗？',
+      'zh-Hant': '先前的請求仍可能完成付款。本次將發起新的購買，可能產生另一筆付款。確定繼續嗎？',
+      'ja': '以前の購入が完了する可能性があります。続行すると新しい購入となり、別の支払いが発生する場合があります。続行しますか？',
+      'en': 'Your earlier request may still complete. Continuing starts a new purchase and may create another payment. Continue?',
+    },
+    'tip_thanks': {
+      'zh-Hans': '感谢你的「{support}」！', 'zh-Hant': '感謝你的「{support}」！',
+      'ja': '「{support}」のご支援ありがとうございます！', 'en': 'Thank you for “{support}”!',
+    },
     'purchase_ios_only': {
       'zh-Hans': '请在 iPhone 或 iPad 上支持开发者',
       'zh-Hant': '請在 iPhone 或 iPad 上支持開發者',
@@ -816,10 +853,10 @@ class AppLocalizations {
       'en': 'Reload the products first.',
     },
     'purchase_verification_failed': {
-      'zh-Hans': '购买验证失败，请稍后重试',
-      'zh-Hant': '購買驗證失敗，請稍後再試',
-      'ja': '購入を検証できませんでした。後でもう一度お試しください',
-      'en': 'Purchase verification failed. Try again later.',
+      'zh-Hans': '购买尚未通过验证，请重新核对支付结果，暂勿重复购买。',
+      'zh-Hant': '購買尚未通過驗證，請重新核對付款結果，暫勿重複購買。',
+      'ja': '購入の検証が完了していません。支払い状況を再確認し、重複購入をお控えください。',
+      'en': 'The purchase has not been verified. Check the payment status before buying again.',
     },
     'purchase_pending': {
       'zh-Hans': '购买待批准，批准后会自动完成感谢',

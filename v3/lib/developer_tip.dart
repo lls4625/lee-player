@@ -50,8 +50,7 @@ class DeveloperTipCelebration {
   }
 }
 
-class DeveloperTipController extends ChangeNotifier
-    with WidgetsBindingObserver {
+class DeveloperTipController extends ChangeNotifier with WidgetsBindingObserver {
   DeveloperTipController() {
     _channel.setMethodCallHandler(_onNativeCall);
     WidgetsBinding.instance.addObserver(this);
@@ -74,102 +73,241 @@ class DeveloperTipController extends ChangeNotifier
     'vip.ichiki.javalee.leeplayer.tip.premium': '顶级鼓励',
     'vip.ichiki.javalee.leeplayer.tip.strong': '鼎力支持',
   };
-  final List<DeveloperTipProduct> _products = <DeveloperTipProduct>[];
+  final List<DeveloperTipProduct> _products = [];
+  final Set<String> _retiredInstances = {};
+  final Set<String> _seen = {};
+  final Set<String> _revoked = {};
+  String? _instance;
+  int _revision = -1;
   bool _initialized = false;
   bool _loading = false;
-  bool _busy = false;
+  bool _nativeBusy = false;
+  bool _calling = false;
+  bool _confirming = false;
   bool _canPay = false;
   bool _disposed = false;
-  int _revision = -1;
-  AppMessage? _message;
+  bool _foreground = WidgetsBinding.instance.lifecycleState == null ||
+      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+  bool _reconciling = false;
+  bool _draining = false;
+  bool _drainAgain = false;
+  bool _hasUnresolved = false;
+  bool _awaitingApproval = false;
+  bool _transportUnknown = false;
+  String _storage = 'initializing';
+  AppMessage? _catalogMessage;
+  AppMessage? _operationMessage;
   String? _processingProductId;
+  String? _requestId;
+  String? _requestOutcome;
+  String? _page;
+  final String _clientId = '${DateTime.now().microsecondsSinceEpoch}-'
+      '${math.Random.secure().nextInt(1 << 32)}';
+  int _pageSequence = 0;
+  bool Function()? _pageVisible;
+  bool Function()? hostReady;
+  void Function(DeveloperTipCelebration)? onLightFeedback;
+  VoidCallback? onLightDismiss;
   DeveloperTipCelebration? _celebration;
+  Timer? _lightTimer;
+  String? _lightId;
 
   List<DeveloperTipProduct> get products => List.unmodifiable(_products);
-
   bool get initialized => _initialized;
   bool get loading => _loading;
-  bool get busy => _busy;
+  bool get busy => _nativeBusy || _calling || _confirming;
+  bool get reconciling => _reconciling;
   bool get supported => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
-  bool get canPay => _canPay;
-  AppMessage? get message => _message;
+  bool get canPay => _canPay && _storage == 'healthy';
+  bool get needsPurchaseConfirmation => _hasUnresolved || _transportUnknown;
   String? get processingProductId => _processingProductId;
   DeveloperTipCelebration? get celebration => _celebration;
+  AppMessage? get message {
+    if (_storage == 'corrupted') return const AppMessage('tip_storage_corrupt');
+    if (_storage != 'healthy' && supported && _initialized) {
+      return const AppMessage('tip_storage_error');
+    }
+    if (_transportUnknown) return const AppMessage('tip_unresolved');
+    if (_awaitingApproval) return const AppMessage('purchase_pending');
+    if (_hasUnresolved && !busy) return const AppMessage('tip_unresolved');
+    return _operationMessage ?? _catalogMessage;
+  }
 
   void _notify() {
     if (!_disposed) notifyListeners();
   }
 
+  Future<Object?> _invoke(String method, [Object? arguments]) =>
+      _channel.invokeMethod<Object?>(method, arguments)
+          .timeout(const Duration(seconds: 15));
+
   void applyNativeState(Object? value) {
     if (_disposed || value is! Map) return;
+    final instance = value['serviceInstanceId'] as String? ?? 'legacy';
+    if (_retiredInstances.contains(instance)) return;
+    if (instance != _instance) {
+      if (_instance != null) _retiredInstances.add(_instance!);
+      _instance = instance;
+      _revision = -1;
+    }
     final revision = (value['revision'] as num?)?.toInt() ?? -1;
-    if (revision < _revision) return;
+    if (revision <= _revision) return;
     _revision = revision;
     _canPay = value['canPay'] == true;
-    final messageCode = value['messageCode'] as String?;
-    final legacyMessage = value['message'] as String?;
-    _message = messageCode == null
-        ? legacyMessage == null
-              ? null
-              : AppMessage('legacy_message', fallback: legacyMessage)
-        : AppMessage(messageCode);
-    _celebration = DeveloperTipCelebration.fromNative(value['celebration']);
-    final rawProducts = value['products'];
-    if (rawProducts is List) {
-      final next =
-          rawProducts
-              .map(DeveloperTipProduct.fromNative)
-              .whereType<DeveloperTipProduct>()
-              .toList()
-            ..sort(
-              (left, right) => displayOrder
-                  .indexOf(left.id)
-                  .compareTo(displayOrder.indexOf(right.id)),
-            );
-      _products
-        ..clear()
-        ..addAll(next);
+    _storage = value['storage'] as String? ?? 'initializing';
+    _nativeBusy = value['busy'] == true;
+    _hasUnresolved = value['hasUnresolved'] == true;
+    _awaitingApproval = value['awaitingApproval'] == true;
+    final requests = value['requestStates'];
+    final requestState = requests is Map ? requests[_requestId] : null;
+    _requestOutcome = requestState is String ? requestState : null;
+    _resolveTransportUncertainty();
+    final code = value['messageCode'] as String?;
+    _catalogMessage = code == null ? null : AppMessage(code);
+    final raw = value['products'];
+    if (raw is List) {
+      final next = raw.map(DeveloperTipProduct.fromNative)
+          .whereType<DeveloperTipProduct>().toList()
+        ..sort((a, b) => displayOrder.indexOf(a.id).compareTo(displayOrder.indexOf(b.id)));
+      _products..clear()..addAll(next);
     }
+    // Historical snapshot fields must never become a presentation instance.
     _initialized = true;
     _notify();
   }
 
   Future<void> _onNativeCall(MethodCall call) async {
+    if (_disposed) return;
     if (call.method == 'state') applyNativeState(call.arguments);
+    if (call.method == 'feedbackRevoked' && call.arguments is String) {
+      final id = call.arguments as String;
+      _revoked.add(id);
+      dismiss(id);
+    }
+    if (call.method == 'feedbackAvailable' || call.method == 'state') {
+      unawaited(_drain());
+    }
+  }
+
+  void attachPage(String session, bool Function() visible) {
+    _page = session;
+    _pageVisible = visible;
+    _operationMessage = null;
+    unawaited(_syncPage());
+  }
+
+  void detachPage(String session) {
+    if (_page != session) return;
+    _page = null;
+    _pageVisible = null;
+    final event = _celebration;
+    if (event != null) dismiss(event.transactionId);
+    unawaited(_syncPage());
+  }
+
+  String? get _visiblePage =>
+      _foreground && (_pageVisible?.call() ?? false) ? _page : null;
+
+  Future<void> _syncPage() async {
+    if (!supported || _disposed) return;
+    try {
+      await _invoke('setPage', {
+        'page': _visiblePage, 'client': _clientId, 'sequence': ++_pageSequence,
+      });
+      await _drain();
+    } catch (_) {
+      // No automatic payment or reissuing a claimed event on reconnect.
+    }
+  }
+
+  void dismiss(String id) {
+    if (_celebration?.transactionId == id) {
+      _celebration = null;
+      _notify();
+    }
+    if (_lightId == id) {
+      _lightId = null;
+      _lightTimer?.cancel();
+      _lightTimer = null;
+      onLightDismiss?.call();
+    }
+    if (!_disposed) unawaited(_drain());
+  }
+
+  Future<void> _drain() async {
+    if (_disposed || !supported || !_foreground || _storage != 'healthy' ||
+        !(hostReady?.call() ?? false)) return;
+    if (_draining) {
+      _drainAgain = true;
+      return;
+    }
+    if (_celebration != null || _lightId != null) return;
+    _draining = true;
+    try {
+      do {
+        _drainAgain = false;
+        final raw = await _invoke('listPendingFeedback');
+        if (_disposed || !_foreground || raw is! List) return;
+        for (final item in raw) {
+          if (_celebration != null || _lightId != null) return;
+          if (!_foreground || !(hostReady?.call() ?? false)) return;
+          final id = item is Map ? item['transactionId'] as String? : null;
+          if (id == null || _seen.contains(id) || _revoked.contains(id)) continue;
+          final session = _visiblePage;
+          final claimed = await _invoke('claimFeedback', {
+            'transactionId': id, 'page': session,
+          });
+          if (claimed is! Map) continue;
+          final event = DeveloperTipCelebration.fromNative(claimed);
+          if (event == null || !_seen.add(event.transactionId)) continue;
+          if (_disposed || !_foreground || _revoked.contains(id) ||
+              session != _visiblePage || !(hostReady?.call() ?? false)) return;
+          if (claimed['animated'] == true && session != null) {
+            _celebration = event;
+            _notify();
+          } else {
+            _lightId = id;
+            onLightFeedback?.call(event);
+            _lightTimer = Timer(const Duration(seconds: 4), () => dismiss(id));
+          }
+          return;
+        }
+      } while (_drainAgain && !_disposed);
+    } catch (error) {
+      _record(error);
+      _drainAgain = false;
+    } finally {
+      _draining = false;
+      if (_drainAgain && !_disposed) {
+        _drainAgain = false;
+        unawaited(_drain());
+      }
+    }
   }
 
   void _record(Object error) {
-    if (error is PlatformException) {
-      final details = error.details;
-      _message = details is Map
-          ? AppMessage.fromMap(<dynamic, dynamic>{
-              ...details,
-              'code': error.code,
-            }, fallback: error.message)
-          : AppMessage(
-              error.code,
-              fallback: error.message,
-              technicalDetail: details == null ? null : '$details',
-            );
-    } else {
-      _message = AppMessage(
-        'purchase_service_unavailable',
-        technicalDetail: '$error',
-      );
-    }
+    _operationMessage = AppMessage(error is PlatformException
+        ? error.code : 'purchase_service_unavailable');
     _notify();
+  }
+
+  void _resolveTransportUncertainty() {
+    if (['succeeded', 'cancelled', 'failed', 'awaitingApproval'].contains(_requestOutcome)) {
+      _transportUnknown = false;
+    }
   }
 
   Future<void> reload() async {
     if (_disposed) return;
     if (!supported) {
       _initialized = true;
-      _message = const AppMessage('purchase_ios_only');
+      _operationMessage = const AppMessage('purchase_ios_only');
       _notify();
       return;
     }
     try {
-      applyNativeState(await _channel.invokeMethod<Object?>('refresh'));
+      applyNativeState(await _invoke('refresh'));
+      await _syncPage();
     } catch (error) {
       _record(error);
     } finally {
@@ -179,13 +317,36 @@ class DeveloperTipController extends ChangeNotifier
     if (!_disposed && _products.isEmpty) unawaited(loadProducts());
   }
 
-  Future<void> loadProducts() async {
-    if (_disposed || !supported || _loading || _busy) return;
-    _loading = true;
-    _message = null;
+  Future<void> reconcile() async {
+    if (_disposed || !supported || _reconciling) return;
+    _reconciling = true;
+    _operationMessage = null;
     _notify();
     try {
-      applyNativeState(await _channel.invokeMethod<Object?>('loadProducts'));
+      final value = await _invoke('reconcile');
+      if (_disposed) return;
+      applyNativeState(value);
+      _resolveTransportUncertainty();
+      await _syncPage();
+    } catch (error) {
+      if (_requestId != null) {
+        _transportUnknown = true;
+        _resolveTransportUncertainty();
+      } else {
+        _record(error);
+      }
+    } finally {
+      _reconciling = false;
+      _notify();
+    }
+  }
+
+  Future<void> loadProducts() async {
+    if (_disposed || !supported || _loading || busy) return;
+    _loading = true;
+    _notify();
+    try {
+      applyNativeState(await _invoke('loadProducts'));
     } catch (error) {
       _record(error);
     } finally {
@@ -195,38 +356,75 @@ class DeveloperTipController extends ChangeNotifier
   }
 
   Future<void> purchase(DeveloperTipProduct product) async {
-    if (_disposed ||
-        !supported ||
-        _busy ||
-        !_canPay ||
-        !_products.any((item) => item.id == product.id)) {
-      return;
-    }
-    _busy = true;
+    if (_disposed || !supported || busy || !canPay ||
+        !_products.any((p) => p.id == product.id)) return;
+    _calling = true;
     _processingProductId = product.id;
-    _message = null;
+    _operationMessage = null;
     _notify();
+    final requestId = '${DateTime.now().microsecondsSinceEpoch}-'
+        '${math.Random.secure().nextInt(1 << 32)}';
+    _requestId = requestId;
+    _requestOutcome = null;
     try {
-      applyNativeState(
-        await _channel.invokeMethod<Object?>('purchase', product.id),
-      );
-    } catch (error) {
-      _record(error);
+      final value = await _invoke('purchase', {
+        'productId': product.id, 'requestId': requestId,
+      });
+      if (_disposed) return;
+      applyNativeState(value);
+      _transportUnknown = false;
+      if (value is Map && value['outcome'] == 'cancelled') {
+        _operationMessage = const AppMessage('purchase_cancelled');
+      }
+    } catch (_) {
+      _transportUnknown = true;
+      _resolveTransportUncertainty();
+      unawaited(reconcile());
     } finally {
-      _busy = false;
+      _calling = false;
       _processingProductId = null;
       _notify();
+      unawaited(_drain());
     }
+  }
+
+  Future<void> confirmAndPurchase(DeveloperTipProduct product,
+      Future<bool> Function() confirm) async {
+    if (busy || !canPay || _disposed) return;
+    if (needsPurchaseConfirmation) {
+      _confirming = true;
+      _notify();
+      var accepted = false;
+      try {
+        accepted = await confirm();
+      } finally {
+        _confirming = false;
+        _notify();
+      }
+      if (!accepted || _disposed) return;
+    }
+    await purchase(product);
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) unawaited(reload());
+    _foreground = state == AppLifecycleState.resumed;
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      final id = _celebration?.transactionId ?? _lightId;
+      if (id != null) dismiss(id);
+      unawaited(_syncPage());
+    }
+    if (_foreground) {
+      unawaited(_syncPage());
+      unawaited(reconcile());
+    }
   }
 
   @override
   void dispose() {
     _disposed = true;
+    _lightTimer?.cancel();
+    onLightDismiss?.call();
     WidgetsBinding.instance.removeObserver(this);
     _channel.setMethodCallHandler(null);
     super.dispose();
@@ -247,6 +445,8 @@ class _DeveloperTipPageState extends State<DeveloperTipPage>
   late final AnimationController _fireworkController;
   Timer? _thanksTimer;
   String? _handledTransactionId;
+  final String _session = '${DateTime.now().microsecondsSinceEpoch}-'
+      '${math.Random.secure().nextInt(1 << 32)}';
   _TipCelebrationLevel? _level;
   bool _staticThanks = false;
 
@@ -258,6 +458,9 @@ class _DeveloperTipPageState extends State<DeveloperTipPage>
     _fireworkController = AnimationController(vsync: this);
     tip.addListener(_onTipChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      tip.attachPage(_session, () => mounted &&
+          (ModalRoute.of(context)?.isCurrent ?? false));
       _onTipChanged();
       unawaited(tip.reload());
     });
@@ -265,8 +468,13 @@ class _DeveloperTipPageState extends State<DeveloperTipPage>
 
   void _onTipChanged() {
     final event = tip.celebration;
+    if (event == null) {
+      _thanksTimer?.cancel();
+      _fireworkController.stop();
+      if (mounted && _level != null) setState(() => _level = null);
+      return;
+    }
     if (!mounted ||
-        event == null ||
         event.transactionId == _handledTransactionId) {
       return;
     }
@@ -278,7 +486,9 @@ class _DeveloperTipPageState extends State<DeveloperTipPage>
         MediaQuery.disableAnimationsOf(context) ||
         MediaQuery.accessibleNavigationOf(context);
     _thanksTimer?.cancel();
-    _thanksTimer = Timer(const Duration(seconds: 5), _dismissCelebration);
+    _thanksTimer = Timer(const Duration(seconds: 5), () {
+      if (_handledTransactionId == event.transactionId) _dismissCelebration();
+    });
     if (!_staticThanks) {
       _fireworkController.duration = level.duration;
       _fireworkController.forward(from: 0);
@@ -291,70 +501,78 @@ class _DeveloperTipPageState extends State<DeveloperTipPage>
     _thanksTimer = null;
     _fireworkController.stop();
     if (mounted) setState(() => _level = null);
+    final id = _handledTransactionId;
+    if (id != null) tip.dismiss(id);
   }
 
   @override
   void dispose() {
     tip.removeListener(_onTipChanged);
+    tip.detachPage(_session);
     _thanksTimer?.cancel();
     _fireworkController.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => GlassScaffold(
-    background: const LeiGlassBackground(),
-    extendBody: false,
-    appBar: GlassAppBar(
-      centerTitle: false,
-      toolbarHeight: 64,
-      padding: const EdgeInsets.symmetric(horizontal: 20),
-      title: const LText('打赏开发者'),
-      leading: LeiGlassIconButton(
-        tooltip: '返回',
-        icon: const Icon(Icons.arrow_back_rounded),
-        onPressed: () => Navigator.of(context).pop(),
+  Widget build(BuildContext context) => PopScope<void>(
+    onPopInvokedWithResult: (didPop, _) {
+      if (didPop) tip.detachPage(_session);
+    },
+    child: GlassScaffold(
+      background: const LeiGlassBackground(),
+      extendBody: false,
+      appBar: GlassAppBar(
+        centerTitle: false,
+        toolbarHeight: 64,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        title: const LText('打赏开发者'),
+        leading: LeiGlassIconButton(
+          tooltip: '返回',
+          icon: const Icon(Icons.arrow_back_rounded),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
       ),
-    ),
-    body: SafeArea(
-      top: false,
-      child: Stack(
-        children: [
-          ListView(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
-            children: <Widget>[
-              LText('感谢你的支持', style: Theme.of(context).textTheme.headlineLarge),
-              const SizedBox(height: 14),
-              LeiSurface(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const LText('你的每一份鼓励，都是雷player不断完善的动力。'),
-                    const SizedBox(height: 8),
-                    LText(
-                      '打赏完全自愿，是一次性、可重复购买的 App Store 消耗型项目；不解锁任何功能或内容，不影响免费使用，且不可恢复。',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
+      body: SafeArea(
+        top: false,
+        child: Stack(
+          children: [
+            ListView(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+              children: <Widget>[
+                LText('感谢你的支持', style: Theme.of(context).textTheme.headlineLarge),
+                const SizedBox(height: 14),
+                LeiSurface(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const LText('你的每一份鼓励，都是雷player不断完善的动力。'),
+                      const SizedBox(height: 8),
+                      LText(
+                        '打赏完全自愿，是一次性、可重复购买的 App Store 消耗型项目；不解锁任何功能或内容，不影响免费使用，且不可恢复。',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                AnimatedBuilder(
+                  animation: tip,
+                  builder: (context, _) => _TipProducts(controller: tip),
+                ),
+              ],
+            ),
+            if (_level != null)
+              Positioned.fill(
+                child: _FireworksOverlay(
+                  level: _level!,
+                  controller: _fireworkController,
+                  staticThanks: _staticThanks,
+                  onDismiss: _dismissCelebration,
                 ),
               ),
-              const SizedBox(height: 16),
-              AnimatedBuilder(
-                animation: tip,
-                builder: (context, _) => _TipProducts(controller: tip),
-              ),
-            ],
-          ),
-          if (_level != null)
-            Positioned.fill(
-              child: _FireworksOverlay(
-                level: _level!,
-                controller: _fireworkController,
-                staticThanks: _staticThanks,
-                onDismiss: _dismissCelebration,
-              ),
-            ),
-        ],
+          ],
+        ),
       ),
     ),
   );
@@ -371,18 +589,16 @@ class _TipProducts extends StatelessWidget {
     final localizations = AppLocalizations.of(context);
     final status = waiting
         ? localizations.text('正在加载商品…')
+        : controller.message != null
+        ? localizations.message(controller.message!)
         : controller.products.isEmpty
-        ? controller.message == null
-              ? localizations.text('暂未获取到商品，请稍后重试')
-              : localizations.message(controller.message!)
+        ? localizations.text('暂未获取到商品，请稍后重试')
         : controller.products.length <
               DeveloperTipController.displayOrder.length
         ? localizations.text('部分商品暂不可用，请稍后重试。')
         : !controller.canPay
         ? localizations.text('当前设备不允许购买。')
-        : controller.message == null
-        ? null
-        : localizations.message(controller.message!);
+        : null;
     return Column(
       children: [
         if (status != null) ...[
@@ -403,8 +619,7 @@ class _TipProducts extends StatelessWidget {
                 ),
                 if (!waiting &&
                     (controller.products.length <
-                            DeveloperTipController.displayOrder.length ||
-                        controller.message != null)) ...[
+                            DeveloperTipController.displayOrder.length)) ...[
                   const SizedBox(height: 12),
                   LeiGlassButton(
                     onPressed: controller.busy ? null : controller.loadProducts,
@@ -412,6 +627,12 @@ class _TipProducts extends StatelessWidget {
                     icon: Icons.refresh_rounded,
                   ),
                 ],
+                const SizedBox(height: 12),
+                TextButton(
+                  onPressed: controller.reconciling ? null : controller.reconcile,
+                  child: Text(localizations.message(AppMessage(
+                    controller.reconciling ? 'tip_checking' : 'tip_reconcile'))),
+                ),
               ],
             ),
           ),
@@ -433,7 +654,24 @@ class _TipProducts extends StatelessWidget {
               product: product,
               enabled: !controller.busy && controller.canPay,
               processing: controller.processingProductId == product.id,
-              onTap: () => controller.purchase(product),
+              onTap: () async {
+                await controller.confirmAndPurchase(product, () async {
+                  final accepted = await showDialog<bool>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: Text(localizations.message(const AppMessage('tip_buy_again'))),
+                      content: Text(localizations.message(const AppMessage('tip_buy_again_warning'))),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(context, false),
+                          child: Text(localizations.text('取消'))),
+                        TextButton(onPressed: () => Navigator.pop(context, true),
+                          child: Text(localizations.message(const AppMessage('tip_buy_again')))),
+                      ],
+                    ),
+                  );
+                  return accepted == true && context.mounted;
+                });
+              },
             );
           },
         ),

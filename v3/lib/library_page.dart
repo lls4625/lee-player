@@ -190,6 +190,8 @@ class LibraryPage extends StatefulWidget {
 class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   PlayerModel get m => widget.model;
   late final DeveloperTipController developerTip = DeveloperTipController();
+  bool developerTipPageOpen = false;
+  OverlayEntry? developerTipToast;
   int tab = 0;
   String folder = '';
   bool playerVisible = false;
@@ -226,6 +228,35 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     m.addListener(changed);
     m.onOpenPlayer = showPlayer;
     unawaited(m.initialize());
+    developerTip.hostReady = () => mounted && Overlay.maybeOf(context) != null;
+    developerTip.onLightDismiss = () {
+      developerTipToast?.remove();
+      developerTipToast?.dispose();
+      developerTipToast = null;
+    };
+    developerTip.onLightFeedback = (event) {
+      if (!mounted) return;
+      final localizations = AppLocalizations.of(context);
+      final name = DeveloperTipController.displayNameKeys[event.productId];
+      final message = localizations.message(AppMessage('tip_thanks', args: {
+        'support': name == null ? '' : localizations.text(name),
+      }));
+      developerTipToast?.remove();
+      developerTipToast?.dispose();
+      developerTipToast = OverlayEntry(builder: (context) => Positioned(
+        top: MediaQuery.paddingOf(context).top + 16,
+        left: 20,
+        right: 20,
+        child: IgnorePointer(child: Material(
+          color: Colors.transparent,
+          child: LeiSurface(child: Text(message, textAlign: TextAlign.center)),
+        )),
+      ));
+      Overlay.of(context, rootOverlay: true).insert(developerTipToast!);
+    };
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(developerTip.reconcile());
+    });
   }
 
   void changed() {
@@ -255,11 +286,17 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   }
 
   Future<void> showDeveloperTip() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => DeveloperTipPage(controller: developerTip),
-      ),
-    );
+    if (developerTipPageOpen) return;
+    developerTipPageOpen = true;
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => DeveloperTipPage(controller: developerTip),
+        ),
+      );
+    } finally {
+      developerTipPageOpen = false;
+    }
   }
 
   Future<void> acknowledgePiPRestore(String? restoreToken) async {
