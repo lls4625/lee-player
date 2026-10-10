@@ -28,6 +28,7 @@ final class LeeMediaKitEngine {
   private(set) var buffering = false
   private(set) var ended = false
   private(set) var seekable = false
+  private(set) var seekabilityKnown = false
   private(set) var failure = ""
   private(set) var trackState: [String: Any] = [:]
   var rate: Float = 1
@@ -125,7 +126,7 @@ final class LeeMediaKitEngine {
       buffering = value; recordDiagnostic("buffering=\(value ? 1 : 0)")
     }
     if let value = state["ended"] as? Bool { ended = value }
-    if let value = state["seekable"] as? Bool { seekable = value }
+    if let value = state["seekable"] as? Bool { seekable = value; seekabilityKnown = true }
     if let value = state["failure"] as? String { failure = value }
     if let value = state["tracks"] as? [String: Any] { trackState = value }
     if let value = state["diagnostics"] as? [String: Any] { engineDiagnostics = value }
@@ -152,7 +153,13 @@ final class PlaybackService: NSObject {
   private var heartbeat: Timer?
   private var engineNotice = ""
   private var fallbackUsed = false
+  // Resume eligibility belongs to the open, not to a later settings change.
   private var pendingResume = false
+  private var initialPositionEstablished = false
+  private var initialHistoricalSeekPending = false
+  private var nonSeekableStartPosition: Double?
+  private var sessionCompleted = false
+  private var lastValidRememberedProgress: [String: Any]?
   private var mediaVolume: Float
   private var mediaBrightness: CGFloat
   private var seekSequence = 0
@@ -462,7 +469,8 @@ final class PlaybackService: NSObject {
       "seeking": isSeeking, "scrubbing": scrubbing, "isAudio": mediaIsAudio,
       "engine": mediaKit == nil ? "AVPlayer" : "media_kit", "engineNotice": engineNotice,
       "diagnostic": lastDiagnostic, "seekable": timelineReady && !seekFault && (mediaKit?.seekable ?? true),
-      "position": position, "duration": duration, "rate": Double(rate), "mode": mode,
+      "position": position, "duration": duration, "progressValid": progressValid,
+      "rate": Double(rate), "mode": mode,
       "continuous": continuous, "background": background, "autoResume": autoResume, "rememberProgress": rememberProgress,
       "rewindSeconds": rewindSeconds, "forwardSeconds": forwardSeconds,
       "smartIntro": smartIntro, "detectingIntro": detectingIntro, "introSkipped": introSkipped,
@@ -546,7 +554,10 @@ final class PlaybackService: NSObject {
     mediaKit?.stopPlayback(); mediaKit = nil
     discardAVPlayerPiP()
     engineNotice = ""; lastDiagnostic = ""; fallbackUsed = false; preparedMediaKit = false
-    seekFault = false; pendingResume = resume
+    seekFault = false; pendingResume = resume && rememberProgress
+    initialPositionEstablished = false; initialHistoricalSeekPending = false; sessionCompleted = false
+    nonSeekableStartPosition = nil
+    lastValidRememberedProgress = nil
     introSkipped = 0
     generation += 1
     let token = generation
@@ -644,17 +655,21 @@ final class PlaybackService: NSObject {
         self.openingTimeout?.cancel()
         self.timelineReady = true
         self.loadTracks(item)
-        // Old records used the source movie clock. Convert once, including pauses inside its empty edit.
-        let record = self.library.recordStore.snapshot[path] ?? [:]
-        let previousOrigin = (record["timelineOrigin"] as? NSNumber)?.doubleValue ?? 0
-        let saved = (record["position"] as? NSNumber)?.doubleValue ?? 0
-        let migrated = saved.isFinite ? max(0, saved + previousOrigin - origin) : 0
-        if self.rememberProgress {
-          self.library.recordStore.updateProgress(path: path,
-            fields: ["position": migrated, "duration": self.duration, "timelineOrigin": origin])
+        let startToken = self.introToken
+        self.library.recordStore.readPlaybackRecord(path: path) { [weak self, weak item] record in
+          guard let self = self, let item = item, self.generation == token,
+            self.player.currentItem === item, self.mediaKit == nil, !self.seekFault,
+            self.introToken == startToken else { return }
+          // Old records used the source movie clock. Migration is committed only
+          // after the initial seek succeeds, so a failed open preserves history.
+          let previousOrigin = (record["timelineOrigin"] as? NSNumber)?.doubleValue ?? 0
+          let saved = (record["position"] as? NSNumber)?.doubleValue ?? 0
+          let migrated = saved.isFinite && saved > 0
+            ? max(0, saved + previousOrigin - origin) : 0
+          let start = self.rememberProgress && self.pendingResume && migrated > 0 && migrated < self.duration - 2 ? migrated : 0
+          self.initialHistoricalSeekPending = start > 0
+          self.prepareStart(url: url, saved: start)
         }
-        let start = self.rememberProgress && resume && migrated > 0 && migrated < self.duration - 2 ? migrated : 0
-        self.prepareStart(url: url, saved: start)
       }
     })
     player.replaceCurrentItem(with: item)
@@ -712,6 +727,9 @@ final class PlaybackService: NSObject {
         guard let self = self, self.introToken == token, self.generation == itemGeneration else { return }
         self.loading = false
         if !finished { self.introSkipped = 0; self.endIntroBackgroundTask(); return }
+        self.initialPositionEstablished = true
+        self.initialHistoricalSeekPending = false
+        self.sessionCompleted = false
         if self.wantsPlayback { self.play() }
         self.endIntroBackgroundTask()
         self.persist(); self.publish()
@@ -841,15 +859,22 @@ final class PlaybackService: NSObject {
   func pause() {
     let clearRecoveryFailure = audioRecoveryExhausted && errorMessage == "audio_recovery_failed"
     cancelAudioRecovery()
-    cancelIntroDetection()
+    let wasDetectingIntro = detectingIntro
+    if wasDetectingIntro { cancelIntroDetection() }
     wantsPlayback = false; resumeAfterInterruption = false
     if clearRecoveryFailure { errorMessage = "" }
     scrubbing = false
-    pauseEngine(); persist(); publish()
+    pauseEngine()
+    // Pausing the scan still needs a confirmed initial position. Do not cancel
+    // an already dispatched initial seek's completion token merely to pause.
+    if wasDetectingIntro { finishStart(0, token: introToken, itemGeneration: generation) }
+    persist(); publish()
   }
 
   func seek(_ seconds: Double, completion: @escaping (Bool) -> Void = { _ in }) {
     guard timelineReady, !seekFault, seconds.isFinite, duration > 0, mediaKit?.seekable ?? true else { completion(false); return }
+    captureRememberedProgress()
+    initialHistoricalSeekPending = false
     cancelIntroDetection()
     introSkipped = 0
     scrubbing = false
@@ -857,6 +882,10 @@ final class PlaybackService: NSObject {
     enqueueSeek(seconds, precise: true) { [weak self] finished in
       guard let self = self else { completion(false); return }
       if finished {
+        // A user seek can supersede initial positioning/intro detection.
+        self.initialPositionEstablished = true
+        self.initialHistoricalSeekPending = false
+        self.sessionCompleted = false
         if self.wantsPlayback && !self.scrubbing { self.play() }
         self.persist()
       }
@@ -866,7 +895,7 @@ final class PlaybackService: NSObject {
 
   func previewSeek(_ seconds: Double) {
     guard timelineReady, !seekFault, seconds.isFinite, duration > 0, mediaKit?.seekable ?? true else { return }
-    if !scrubbing { cancelIntroDetection(); scrubbing = true; pauseEngine() }
+    if !scrubbing { captureRememberedProgress(); cancelIntroDetection(); scrubbing = true; pauseEngine() }
     if mediaKit != nil { publish(); return }
     enqueueSeek(seconds, precise: false) { _ in }
   }
@@ -950,14 +979,10 @@ final class PlaybackService: NSObject {
   }
 
   private func ended() {
-    guard wantsPlayback else { return }
-    if let path = currentPath {
-      if rememberProgress {
-        library.recordStore.updateProgress(path: path, fields: ["position": 0.0,
-          "completed": true, "duration": duration, "timelineOrigin": timelineOrigin])
-      }
-    }
+    guard wantsPlayback, initialPositionEstablished, !loading, !sessionCompleted else { return }
     if let a = aPoint, bPoint != nil { seek(a); return }
+    sessionCompleted = true
+    persist()
     if !continuous { wantsPlayback = false; pauseEngine(); publish(); return }
     if mode == "one" { load(resume: false); return }
     if index == queue.count - 1 && mode == "sequence" { wantsPlayback = false; publish(); return }
@@ -1052,9 +1077,31 @@ final class PlaybackService: NSObject {
 
   private func configure(_ values: [String: Any]) throws {
     if let value = values["rememberProgress"] as? Bool {
+      // Capture the last stable ON snapshot before disabling writes. Enabling
+      // records this session in place; it must never trigger a historical seek.
+      if rememberProgress && !value {
+        captureRememberedProgress()
+        if let path = currentPath, var final = lastValidRememberedProgress {
+          final["lastPlayed"] = Date().timeIntervalSince1970
+          library.recordStore.updateProgress(path: path, fields: final)
+          lastSave = Date()
+        }
+      }
+      if !value {
+        pendingResume = false
+        if !initialPositionEstablished && initialHistoricalSeekPending {
+          initialHistoricalSeekPending = false
+          introToken += 1 // Also invalidate a success already queued on main.
+          // Revoke a historical start that has not yet settled. The seek queue
+          // supersedes its acknowledgment before establishing the zero start.
+          finishStart(0, token: introToken, itemGeneration: generation)
+        }
+      }
+      if value != rememberProgress { lastValidRememberedProgress = nil }
+      let wasEnabled = rememberProgress
       rememberProgress = value
       UserDefaults.standard.set(value, forKey: "playback.rememberProgress")
-      if value { persist() }
+      if value && !wasEnabled { persist() }
     }
     if let value = values["smartIntro"] as? Bool {
       smartIntro = value
@@ -1178,6 +1225,7 @@ final class PlaybackService: NSObject {
   }
 
   private func tick() {
+    captureRememberedProgress()
     checkTrackSelection()
     if let engine = mediaKit, !preparedMediaKit, !seekFault { mediaKitChanged(engine, token: generation) }
     if let deadline = sleepUntil, Date() >= deadline { sleepTimer?.invalidate(); sleepTimer = nil; sleepUntil = nil; pause() }
@@ -1194,14 +1242,25 @@ final class PlaybackService: NSObject {
     publish()
   }
 
+  private var progressValid: Bool {
+    let currentPosition = mediaKit?.position ?? player.currentTime().seconds
+    return timelineReady && !seekFault && initialPositionEstablished
+      && !detectingIntro && !loading && !isSeeking && !scrubbing
+      && currentPath != nil && currentPosition.isFinite && currentPosition >= 0
+      && duration.isFinite && duration > 0 && timelineOrigin.isFinite
+  }
+
+  private func captureRememberedProgress() {
+    guard rememberProgress, progressValid else { return }
+    let completed = sessionCompleted || position >= duration - 0.5
+    lastValidRememberedProgress = ["position": completed ? 0.0 : position,
+      "duration": duration, "timelineOrigin": timelineOrigin, "completed": completed]
+  }
+
   func persist() {
-    guard timelineReady, !detectingIntro, !loading, !isSeeking, !scrubbing, let path = currentPath else { return }
-    var record: [String: Any] = [:]
-    if rememberProgress {
-      record["position"] = duration > 0 && position >= duration - 0.5 ? 0.0 : position
-      record["duration"] = duration
-      record["timelineOrigin"] = timelineOrigin
-    }
+    guard progressValid, let path = currentPath else { return }
+    captureRememberedProgress()
+    var record: [String: Any] = rememberProgress ? lastValidRememberedProgress ?? [:] : [:]
     record["lastPlayed"] = Date().timeIntervalSince1970
     library.recordStore.updateProgress(path: path, fields: record)
     // Submission throttle only; the store tracks dirty data and retries failed commits.
@@ -1272,9 +1331,11 @@ final class PlaybackService: NSObject {
       let reason = AVAudioSession.RouteChangeReason(rawValue: raw),
       reason == .oldDeviceUnavailable else { return }
     cancelAudioRecovery()
-    cancelIntroDetection()
+    let wasDetectingIntro = detectingIntro
+    if wasDetectingIntro { cancelIntroDetection() }
     wantsPlayback = false; resumeAfterInterruption = false; scrubbing = false
     pauseEngine(); errorMessage = ""
+    if wasDetectingIntro { finishStart(0, token: introToken, itemGeneration: generation) }
 
     let wirelessOrHeadphones: [AVAudioSession.Port] = [
       .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .headphones,
@@ -1546,7 +1607,9 @@ final class PlaybackService: NSObject {
     player.pause(); player.replaceCurrentItem(with: nil)
     observations = Array(observations.prefix(1))
     timelineReady = false; timelineOrigin = 0; preparedMediaKit = false
-    pendingResume = resume; loading = true
+    initialPositionEstablished = false; initialHistoricalSeekPending = false; sessionCompleted = false
+    nonSeekableStartPosition = nil
+    loading = true
     guard let transport = mediaKitTransport else { fail("playback_channel_unavailable"); return }
     let engine = LeeMediaKitEngine(transport: transport)
     mediaKit = engine
@@ -1567,28 +1630,48 @@ final class PlaybackService: NSObject {
       if errorMessage != engine.failure { lastDiagnostic = engine.failure; fail(engine.failure) }
       return
     }
-    if engine.ready && engine.duration > 0 && !preparedMediaKit {
+    if engine.seekable, nonSeekableStartPosition != nil, !initialPositionEstablished {
+      // An initially unavailable seek capability may settle after metadata.
+      // Preserve the original resume intent until positioning actually starts.
+      nonSeekableStartPosition = nil
+      preparedMediaKit = false; loading = true
+    }
+    if engine.ready && engine.duration > 0 && engine.seekabilityKnown && !preparedMediaKit {
       preparedMediaKit = true; timelineReady = true; openingTimeout?.cancel()
-      let record = library.recordStore.snapshot[currentPath ?? ""] ?? [:]
-      let saved = (record["position"] as? NSNumber)?.doubleValue ?? 0
-      let previousOrigin = (record["timelineOrigin"] as? NSNumber)?.doubleValue ?? 0
-      let sourceTime = saved + previousOrigin
-      let start = rememberProgress && pendingResume && sourceTime.isFinite && sourceTime > 0 && sourceTime < duration - 2 ? sourceTime : 0
-      if rememberProgress, let path = currentPath {
-        library.recordStore.updateProgress(path: path,
-          fields: ["position": start, "duration": duration, "timelineOrigin": 0.0])
-      }
-      loading = false
-      if engine.seekable {
-        finishStart(start, token: introToken, itemGeneration: token)
-      } else {
-        engineNotice = "media_not_seekable"
-        if wantsPlayback { play() }
-        publish()
+      let startToken = introToken
+      library.recordStore.readPlaybackRecord(path: currentPath ?? "") { [weak self, weak engine] record in
+        guard let self = self, let engine = engine, self.generation == token,
+          self.mediaKit === engine, !self.seekFault, self.introToken == startToken else { return }
+        let saved = (record["position"] as? NSNumber)?.doubleValue ?? 0
+        let previousOrigin = (record["timelineOrigin"] as? NSNumber)?.doubleValue ?? 0
+        let sourceTime = saved > 0 ? saved + previousOrigin : 0
+        let start = self.rememberProgress && self.pendingResume && sourceTime.isFinite && sourceTime > 0 && sourceTime < self.duration - 2 ? sourceTime : 0
+        // Keep the historical record intact until positioning is acknowledged.
+        self.loading = false
+        if engine.seekable {
+          if self.engineNotice == "media_not_seekable" { self.engineNotice = "" }
+          self.initialHistoricalSeekPending = start > 0
+          self.finishStart(start, token: self.introToken, itemGeneration: token)
+        } else {
+          self.engineNotice = "media_not_seekable"
+          self.nonSeekableStartPosition = engine.position
+          if self.wantsPlayback { self.play() }
+          self.publish()
+        }
       }
       return
     }
+    if let initial = nonSeekableStartPosition, !initialPositionEstablished,
+      engine.ready, engine.playing, !engine.buffering, engine.position > initial,
+      !seekFault, !loading, !isSeeking, !scrubbing {
+      // Metadata-ready at zero is not proof of a playable non-seekable stream.
+      // Only observed playback advancement can replace its historical record.
+      nonSeekableStartPosition = nil
+      initialPositionEstablished = true
+      persist()
+    }
     if engine.ended && !isSeeking && !scrubbing { ended(); return }
+    captureRememberedProgress()
   }
 
   func receiveMediaKitState(_ state: [String: Any]) {

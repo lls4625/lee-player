@@ -687,7 +687,7 @@ class MediaKitPlayback extends ChangeNotifier {
     await _channel.invokeMethod<bool>('state', {
       'engineId': id, 'position': position.isFinite ? position : 0,
       'duration': duration.isFinite ? duration : 0, 'ready': _ready,
-      'seekable': values[2] == 'yes' || values[2] == 'true',
+      'seekable': mediaKitSeekability(values[2]),
       'playing': values[5] == null
         ? state.playing
         : (values[5] == 'no' || values[5] == 'false') && values[6] != 'yes' && values[6] != 'true',

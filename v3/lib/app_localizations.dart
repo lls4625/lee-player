@@ -1278,10 +1278,10 @@ class AppLocalizations {
       'ja': 'ゴミ箱内の全ファイルが完全に削除され、復元できません。',
       'en': 'Every file in Trash will be permanently deleted and cannot be recovered.',
     },
-    '关闭进度记忆后从头播放，已有记录保留。断点续播优先于片头跳过；倍速与循环模式可在播放页调整。': {
-      'zh-Hant': '關閉進度記憶後會從頭播放，既有記錄仍會保留。斷點續播優先於片頭跳過；倍速與循環模式可在播放頁調整。',
-      'ja': '再生位置の記憶をオフにすると最初から再生します。既存の履歴は保持されます。再開位置は冒頭スキップより優先され、速度とリピートは再生画面で変更できます。',
-      'en': 'When position memory is off, playback starts at the beginning; existing records remain. Resume takes priority over intro skip. Speed and repeat are adjusted on the playback screen.',
+    '关闭后不保存或显示列表进度，再次打开课程不恢复历史断点；已有记录保留，当前播放与继续播放卡片不受影响。重新开启后按当前有效进度记录，不跳回旧断点。断点续播优先于片头跳过；倍速与循环模式可在播放页调整。': {
+      'zh-Hant': '關閉後不儲存或顯示列表進度，再次開啟課程不恢復歷史播放位置；既有記錄保留，目前播放與繼續播放卡片不受影響。重新開啟後記錄目前有效進度，不跳回舊位置。斷點續播優先於片頭跳過；倍速與循環模式可在播放頁調整。',
+      'ja': 'オフにすると再生位置の保存と一覧表示を停止し、次に開くと過去の位置から再開しません。既存の記録は保持され、現在の再生と再開カードには影響しません。再びオンにすると現在の有効な位置を記録し、古い位置には戻りません。再開位置は冒頭スキップより優先され、速度とリピートは再生画面で変更できます。',
+      'en': 'When off, positions are neither saved nor shown in lists, and reopened lessons do not resume from history. Prior records are kept; current playback and its resume card are unaffected. Turning it back on records the current valid position without jumping to an old one. Resume takes priority over intro skip. Adjust speed and repeat on the playback screen.',
     },
     '仅在中断前正在播放、且 iOS 允许时恢复。': {
       'zh-Hant': '僅在中斷前正在播放且 iOS 允許時恢復。',
@@ -1595,6 +1595,11 @@ class AppLocalizations {
       'en': 'Media: {count} · Course order',
     },
     '上次播至 {time}': {'zh-Hant': '上次播放至 {time}', 'ja': '前回の位置 {time}', 'en': 'Last played at {time}'},
+    '播放进度暂不可用': {
+      'zh-Hant': '播放進度暫時無法取得',
+      'ja': '再生位置を現在取得できません',
+      'en': 'Playback position temporarily unavailable',
+    },
     '尚未记录进度': {'zh-Hant': '尚未記錄進度', 'ja': '再生位置なし', 'en': 'No saved position'},
     '减速 0.05 倍': {'zh-Hant': '減速 0.05 倍', 'ja': '0.05 倍減速', 'en': 'Decrease speed by 0.05×'},
     '加速 0.05 倍': {'zh-Hant': '加速 0.05 倍', 'ja': '0.05 倍加速', 'en': 'Increase speed by 0.05×'},

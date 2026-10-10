@@ -6,6 +6,14 @@ import 'dart:async';
 /// error classification testable without constructing a media_kit player.
 enum MediaKitRuntimeErrorKind { recoverable, fatal }
 
+/// A missing/timed-out property is unknown, not proof of a non-seekable stream.
+bool? mediaKitSeekability(String? value) => switch (value?.trim().toLowerCase()) {
+  'yes' || 'true' => true,
+  'no' || 'false' => false,
+  _ => null,
+};
+
+
 MediaKitRuntimeErrorKind classifyMediaKitRuntimeError(String message) {
   // media_kit exposes this stream as text, so recognize only its top-level
   // source-open error envelope.  In particular, generic decoder/render log

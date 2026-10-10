@@ -276,6 +276,24 @@ final class LibraryRecordStore {
     return next
   }
 
+  /// Reads behind previously submitted progress, including retryable dirty data.
+  /// Playback must not resume from an older published disk snapshot after a pause
+  /// or settings toggle. Disk work remains off the playback/main thread.
+  func readPlaybackRecord(path: String, completion: @escaping ([String: Any]) -> Void) {
+    work.async {
+      let record = self.merged()[path] ?? [:]
+      let readEpoch = self.currentEpoch
+      DispatchQueue.main.async {
+        // A clear/removal may finish after this read but before main delivery.
+        guard readEpoch == self.currentEpoch else {
+          self.readPlaybackRecord(path: path, completion: completion)
+          return
+        }
+        completion(record)
+      }
+    }
+  }
+
   func updateProgress(path: String, fields: [String: Any]) {
     let submittedEpoch = currentEpoch
     work.async {

@@ -580,10 +580,11 @@ class _PlaybackPageState extends State<PlaybackPage> {
             platformViewBackdrop: true,
           ),
           if (paths.isEmpty) const Padding(padding: EdgeInsets.all(24), child: LText('队列为空，请返回课程库选择媒体。')),
-          Expanded(child: ListView.builder(itemCount: paths.length, itemBuilder: (context, index) {
-            final current = index == selectedIndex;
-            final record = m.record(paths[index]);
-            final position = (record['position'] as num?)?.toDouble() ?? 0;
+          Expanded(child: AnimatedBuilder(animation: m, builder: (context, _) =>
+            ListView.builder(itemCount: paths.length, itemBuilder: (context, index) {
+            final current = paths[index] == m.path;
+            final progress = m.displayProgress(paths[index]);
+            final position = progress?.position ?? 0;
             return LeiGlassTile(
               leading: SizedBox(width: 48, child: current
                 ? const LeiMediaIcon(icon: Icons.graphic_eq_rounded)
@@ -591,7 +592,11 @@ class _PlaybackPageState extends State<PlaybackPage> {
               title: Text(paths[index].split('/').last, maxLines: 2, overflow: TextOverflow.ellipsis,
                 style: current ? const TextStyle(color: leiGold, fontWeight: FontWeight.w600) : null),
               subtitle: current
-                  ? const LText('当前课程')
+                  ? progress == null
+                    ? const LText('当前课程')
+                    : LText('已播 {time}', args: {'time': timeLabel(position)})
+                  : !m.rememberProgress
+                  ? null
                   : position > 0
                   ? LText(
                       '上次播至 {time}',
@@ -599,7 +604,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
                     )
                   : const LText('尚未记录进度'),
               onTap: () => Navigator.pop(context, index));
-          })),
+          }))),
         ]))));
     if (selected == null || !mounted) return;
     if (generation != m.state['generation']) {

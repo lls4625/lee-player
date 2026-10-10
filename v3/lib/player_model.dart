@@ -154,6 +154,31 @@ class PlayerModel extends ChangeNotifier {
       (state[key] as num?)?.toDouble() ?? fallback;
   List<String> get queue => (state['queue'] as List?)?.cast<String>() ?? [];
   Map<String, dynamic> record(String path) => records[path] ?? {};
+  bool get rememberProgress => state['rememberProgress'] != false;
+
+  /// Display state is deliberately separate from the durable records snapshot.
+  /// A current session never falls back to a previous session's saved position.
+  ({double position, double duration})? displayProgress(
+    String entryPath, {
+    bool forResumeCard = false,
+  }) {
+    if (!rememberProgress && !(forResumeCard && entryPath == path)) return null;
+    if (entryPath == path && path.isNotEmpty) {
+      if (state['progressValid'] != true ||
+          !position.isFinite ||
+          !duration.isFinite ||
+          position < 0 ||
+          duration <= 0) return null;
+      return (position: position, duration: duration);
+    }
+    final saved = record(entryPath);
+    final savedPosition = (saved['position'] as num?)?.toDouble() ?? 0;
+    final savedDuration = (saved['duration'] as num?)?.toDouble() ?? 0;
+    if (!savedPosition.isFinite || !savedDuration.isFinite ||
+        savedPosition < 0 || savedDuration < 0) return null;
+    return (position: savedPosition, duration: savedDuration);
+  }
+
   MediaEntry? entry(String path) {
     for (final entry in entries) {
       if (entry.path == path) return entry;
@@ -174,19 +199,6 @@ class PlayerModel extends ChangeNotifier {
         switch (data['type']) {
           case 'player':
             _applyState(data['state']);
-            if (path.isNotEmpty && duration > 0) {
-              if (playing && record(path)['lastPlayed'] == null)
-                libraryRevision++;
-              records[path] = {
-                ...record(path),
-                if (state['rememberProgress'] != false) ...{
-                  'position': position,
-                  'duration': duration,
-                },
-                if (playing)
-                  'lastPlayed': DateTime.now().millisecondsSinceEpoch / 1000,
-              };
-            }
             break;
           case 'records':
             _applyRecords(data);

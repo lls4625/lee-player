@@ -1242,7 +1242,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         ),
         jumpSecondsPreference(Icons.replay_rounded, '后退秒数', 'rewindSeconds'),
         jumpSecondsPreference(Icons.forward_rounded, '前进秒数', 'forwardSeconds'),
-      ], footer: '关闭进度记忆后从头播放，已有记录保留。断点续播优先于片头跳过；倍速与循环模式可在播放页调整。'),
+      ], footer: '关闭后不保存或显示列表进度，再次打开课程不恢复历史断点；已有记录保留，当前播放与继续播放卡片不受影响。重新开启后按当前有效进度记录，不跳回旧断点。断点续播优先于片头跳过；倍速与循环模式可在播放页调整。'),
       () => settingSection('后台与中断', [
         const LeiGlassTile(
           flat: true,
@@ -1491,14 +1491,15 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   MediaEntry? get resumeEntry {
     final current = m.entry(m.path);
     if (current != null && current.isPlayable) return current;
-    if (m.state['rememberProgress'] == false) return null;
+    if (!m.rememberProgress) return null;
     MediaEntry? latest;
     num lastPlayed = -1;
     for (final entry in m.entries) {
       if (!entry.isPlayable) continue;
       final record = m.record(entry.path);
-      final position = (record['position'] as num?) ?? 0;
-      final duration = (record['duration'] as num?) ?? 0;
+      final progress = m.displayProgress(entry.path);
+      final position = progress?.position ?? 0;
+      final duration = progress?.duration ?? 0;
       final played = (record['lastPlayed'] as num?) ?? 0;
       if (position <= 0 || (duration > 0 && position >= duration)) continue;
       if (played > lastPlayed) {
@@ -1511,13 +1512,9 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
 
   Widget resumeCard(MediaEntry entry) {
     final current = entry.path == m.path;
-    final record = m.record(entry.path);
-    final position = current
-        ? m.position
-        : (record['position'] as num?)?.toDouble() ?? 0;
-    final duration = current
-        ? m.duration
-        : (record['duration'] as num?)?.toDouble() ?? 0;
+    final progress = m.displayProgress(entry.path, forResumeCard: true);
+    final position = progress?.position ?? 0;
+    final duration = progress?.duration ?? 0;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
       child: Column(
@@ -1565,31 +1562,38 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                   ],
                 ),
                 const SizedBox(height: 18),
-                LText(
-                  '{status} {position} / {duration}',
-                  args: {
-                    'status': AppLocalizations.of(context).text(
-                      current && m.loading
-                          ? '正在加载'
-                          : current && m.playing
-                          ? '正在播放'
-                          : '已播',
-                    ),
-                    'position': timeLabel(position),
-                    'duration': timeLabel(duration),
-                  },
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-                const SizedBox(height: 10),
-                GlassProgressIndicator.linear(
-                  minWidth: 0,
-                  height: 3,
-                  value: duration > 0
-                      ? (position / duration).clamp(0, 1).toDouble()
-                      : 0,
-                  color: leiAccent(context),
-                  semanticLabel: AppLocalizations.of(context).text('当前课程播放进度'),
-                ),
+                if (progress == null)
+                  LText(
+                    current && m.loading ? '正在加载' : '播放进度暂不可用',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  )
+                else ...[
+                  LText(
+                    '{status} {position} / {duration}',
+                    args: {
+                      'status': AppLocalizations.of(context).text(
+                        current && m.loading
+                            ? '正在加载'
+                            : current && m.playing
+                            ? '正在播放'
+                            : '已播',
+                      ),
+                      'position': timeLabel(position),
+                      'duration': timeLabel(duration),
+                    },
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 10),
+                  GlassProgressIndicator.linear(
+                    minWidth: 0,
+                    height: 3,
+                    value: duration > 0
+                        ? (position / duration).clamp(0, 1).toDouble()
+                        : 0,
+                    color: leiAccent(context),
+                    semanticLabel: AppLocalizations.of(context).text('当前课程播放进度'),
+                  ),
+                ],
                 const SizedBox(height: 16),
                 Row(
                   children: [
@@ -1748,8 +1752,9 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   Widget fileRow(MediaEntry e) {
     final localizations = AppLocalizations.of(context);
     final r = m.record(e.path);
-    final position = (r['position'] as num?)?.toDouble() ?? 0;
-    final duration = (r['duration'] as num?)?.toDouble() ?? 0;
+    final progress = m.displayProgress(e.path);
+    final position = progress?.position ?? 0;
+    final duration = progress?.duration ?? 0;
     final details = e.isFolder
         ? localizations.text('{count} 项 · 文件夹', args: {
             'count': folderCount(e.path),

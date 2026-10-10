@@ -118,6 +118,76 @@ final class LibraryTransactionTests: XCTestCase {
     XCTAssertEqual(records[path]?["favorite"] as? Bool, favorite, file: file, line: line)
   }
 
+  private func playbackRecord(_ library: CourseLibrary, path: String = "lesson.mp4") -> [String: Any] {
+    let ready = expectation(description: "Ordered playback record read")
+    var result: [String: Any] = [:]
+    library.recordStore.readPlaybackRecord(path: path) { result = $0; ready.fulfill() }
+    wait(for: [ready], timeout: 5)
+    return result
+  }
+
+  func testPlaybackReadSeesLatestSubmittedProgressAndIndependentFavorite() throws {
+    let library = try library()
+    try Data("A".utf8).write(to: root.appendingPathComponent("lesson.mp4"))
+    try library.recordStore.mutate { $0["lesson.mp4"] = recordA }
+    library.recordStore.updateProgress(path: "lesson.mp4", fields: ["position": 67.0, "completed": false])
+    let record = playbackRecord(library)
+    XCTAssertEqual(record["position"] as? Double, 67)
+    XCTAssertEqual(record["favorite"] as? Bool, true)
+    XCTAssertEqual(record["completed"] as? Bool, false)
+  }
+
+  func testPlaybackReadIncludesUncommittedRetryableProgress() throws {
+    let library = try library()
+    try Data("A".utf8).write(to: root.appendingPathComponent("lesson.mp4"))
+    try library.recordStore.mutate { $0["lesson.mp4"] = recordA }
+    let file = support.appendingPathComponent("library.json")
+    let backup = support.appendingPathComponent("saved-library.json")
+    try fm.moveItem(at: file, to: backup)
+    try fm.createDirectory(at: file, withIntermediateDirectories: false)
+    library.recordStore.updateProgress(path: "lesson.mp4", fields: ["position": 72.0])
+    XCTAssertEqual(playbackRecord(library)["position"] as? Double, 72)
+    XCTAssertEqual(library.recordStore.snapshot["lesson.mp4"]?["position"] as? Double, 45)
+    XCTAssertNil(library.recordStore.status, "The first retryable failure stays silent")
+    try fm.removeItem(at: file)
+    try fm.moveItem(at: backup, to: file)
+    try library.recordStore.mutate { _ in }
+    XCTAssertEqual(playbackRecord(library)["position"] as? Double, 72)
+  }
+
+  func testPlaybackReadRevalidatesClearBeforeMainQueueDelivery() throws {
+    let library = try library()
+    try Data("A".utf8).write(to: root.appendingPathComponent("lesson.mp4"))
+    try library.recordStore.mutate { $0["lesson.mp4"] = recordA }
+    let ready = expectation(description: "Clear invalidates stale playback read")
+    library.recordStore.readPlaybackRecord(path: "lesson.mp4") { record in
+      XCTAssertNil(record["position"])
+      XCTAssertEqual(record["favorite"] as? Bool, true)
+      ready.fulfill()
+    }
+    // mutate is serialized behind the read but finishes before main delivery.
+    try library.recordStore.mutate { $0["lesson.mp4"]?.removeValue(forKey: "position") }
+    wait(for: [ready], timeout: 5)
+  }
+
+  func testLastPlayedOnlySubmissionPreservesAllHistoricalProgressFields() throws {
+    let library = try library()
+    try Data("A".utf8).write(to: root.appendingPathComponent("lesson.mp4"))
+    try library.recordStore.mutate {
+      $0["lesson.mp4"] = ["position": 0.0, "duration": 120.0, "timelineOrigin": 3.0,
+        "completed": true, "favorite": true]
+    }
+    library.recordStore.updateProgress(path: "lesson.mp4", fields: ["lastPlayed": 123.0])
+    let record = playbackRecord(library)
+    XCTAssertEqual(record["position"] as? Double, 0)
+    XCTAssertEqual(record["duration"] as? Double, 120)
+    XCTAssertEqual(record["timelineOrigin"] as? Double, 3)
+    XCTAssertEqual(record["completed"] as? Bool, true)
+    XCTAssertEqual(record["favorite"] as? Bool, true)
+    XCTAssertEqual(record["lastPlayed"] as? Double, 123)
+    XCTAssertTrue(playbackRecord(library, path: "other.mp4").isEmpty)
+  }
+
   func testSameNameImportsAndRecyclesKeepIndependentHistoriesAcrossRestart() throws {
     let initial = try library()
     try Data("A".utf8).write(to: root.appendingPathComponent("lesson.mp4"))
