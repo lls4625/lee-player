@@ -1,7 +1,7 @@
 name: leeplayer
 description: "Local course video player for iOS."
 publish_to: 'none'
-version: 3.0.0+6
+version: 3.0.0+7
 
 environment:
   sdk: ^3.13.2
