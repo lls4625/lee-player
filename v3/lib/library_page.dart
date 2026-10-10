@@ -1954,8 +1954,6 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
               constraints: const BoxConstraints(maxWidth: 900),
               child: Column(
                 children: [
-                  if (m.scanning)
-                    GlassProgressIndicator.linear(color: leiAccent(context)),
                   if (m.recordsIssue != null)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(20, 8, 20, 8),
