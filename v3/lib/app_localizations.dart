@@ -1073,6 +1073,21 @@ class AppLocalizations {
       'ja': '開発者を支援',
       'en': 'Support the Developer',
     },
+    '在 App Store 评价': {
+      'zh-Hant': '在 App Store 評價',
+      'ja': 'App Store で評価',
+      'en': 'Rate on the App Store',
+    },
+    '喜欢雷player？欢迎留下评分与评论': {
+      'zh-Hant': '喜歡雷player？歡迎留下評分與評論',
+      'ja': '雷player を気に入ったら、評価やレビューをお願いします',
+      'en': 'Enjoying 雷player? Leave a rating or review',
+    },
+    '无法打开 App Store 评价页面，请稍后重试。': {
+      'zh-Hant': '無法開啟 App Store 評價頁面，請稍後再試。',
+      'ja': 'App Store の評価ページを開けません。しばらくしてからもう一度お試しください。',
+      'en': 'Unable to open the App Store review page. Please try again later.',
+    },
     '关于雷player': {
       'zh-Hant': '關於雷player',
       'ja': '雷player について',

@@ -12,6 +12,8 @@ import 'app_localizations.dart';
 
 const _privacyPolicyUrl =
     'https://www.wlsp1881.com/leeplayer/privacy-policy.html';
+const _appStoreReviewUrl =
+    'https://apps.apple.com/app/id6820056437?action=write-review';
 const _appChannel = MethodChannel('lei.player/app');
 
 class LegalDocumentPage extends StatelessWidget {
@@ -296,6 +298,25 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     } finally {
       developerTipPageOpen = false;
     }
+  }
+
+  Future<void> openAppStoreReview() async {
+    var opened = false;
+    try {
+      opened =
+          await _appChannel.invokeMethod<bool>('openUrl', <String, String>{
+            'url': _appStoreReviewUrl,
+          }) ??
+          false;
+    } on PlatformException {
+      opened = false;
+    } on MissingPluginException {
+      opened = false;
+    }
+    if (opened || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: LText('无法打开 App Store 评价页面，请稍后重试。')),
+    );
   }
 
   Future<void> acknowledgePiPRestore(String? restoreToken) async {
@@ -1285,6 +1306,13 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           title: const LText('打赏开发者'),
           subtitle: const LText('通过 App Store 自愿支持，不解锁任何功能'),
           onTap: showDeveloperTip,
+        ),
+        LeiGlassTile(
+          flat: true,
+          leading: const LeiMediaIcon(icon: Icons.star_rate_rounded),
+          title: const LText('在 App Store 评价'),
+          subtitle: const LText('喜欢雷player？欢迎留下评分与评论'),
+          onTap: openAppStoreReview,
         ),
       ], footer: '打赏为可重复购买的消耗型项目，完全自愿且不可恢复；雷player 始终免费、无广告。'),
       () => settingSection('关于雷player', [
