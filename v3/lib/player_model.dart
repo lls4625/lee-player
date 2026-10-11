@@ -154,6 +154,7 @@ class PlayerModel extends ChangeNotifier {
       (state[key] as num?)?.toDouble() ?? fallback;
   List<String> get queue => (state['queue'] as List?)?.cast<String>() ?? [];
   Map<String, dynamic> record(String path) => records[path] ?? {};
+  bool get backgroundPlayback => state['background'] != false;
   bool get rememberProgress => state['rememberProgress'] != false;
 
   /// Display state is deliberately separate from the durable records snapshot.

@@ -12,6 +12,18 @@ struct AudioRecoveryRetryPolicy {
   }
 }
 
+/// One playback-environment rule for both engines. Inactive UI (Control Center,
+/// dialogs, page changes) is deliberately not an actual background transition.
+struct BackgroundPlaybackPolicy {
+  static func permitsPlayback(backgroundEnabled: Bool, inBackground: Bool,
+                              session: Int, pipSession: Int?, pipActive: Bool,
+                              pipDeadline: Double?, now: Double) -> Bool {
+    if !inBackground || backgroundEnabled { return true }
+    guard pipSession == session else { return false }
+    return pipActive || pipDeadline.map { now < $0 } == true
+  }
+}
+
 final class LeeMediaKitEngine {
   let id = UUID().uuidString
   var changed: (() -> Void)?
@@ -74,7 +86,7 @@ final class LeeMediaKitEngine {
     send("open", ["url": url.absoluteString, "isAudio": isAudio, "rate": Double(rate), "volume": Double(volume)])
   }
 
-  func pausePlayback() { send("pause"); recordDiagnostic("pause") }
+  func pausePlayback(completion: ((Bool) -> Void)? = nil) { send("pause", completion: completion); recordDiagnostic("pause") }
   func resumePlayback(completion: @escaping (Bool) -> Void) {
     send("play", completion: completion); recordDiagnostic("resume")
   }
@@ -188,8 +200,24 @@ final class PlaybackService: NSObject {
     mediaKitPiPPreparing || mediaKitPiP != nil || mediaKitPiPRestoring || pipStartIssued || pipActive || !retiringPiP.isEmpty
   }
   private var isSeeking: Bool { activeSeek != nil || pendingSeek != nil }
-  private func pauseEngine() { if let mediaKit = mediaKit { mediaKit.pausePlayback() } else { player.pause() } }
+  private func pauseEngine() {
+    if let engine = mediaKit {
+      engine.pausePlayback { [weak self, weak engine] success in
+        DispatchQueue.main.async {
+          guard let self, let engine, self.mediaKit === engine, success else { return }
+          self.deactivateAudioSessionIfIdle()
+          self.publish()
+        }
+      }
+    } else {
+      player.pause()
+      deactivateAudioSessionIfIdle()
+    }
+  }
   private func resumeEngine(completion: @escaping (Bool) -> Void) {
+    guard wantsPlayback, playbackEnvironmentAllowsPlayback, !interrupted else {
+      completion(false); return
+    }
     if let mediaKit = mediaKit {
       mediaKit.rate = rate
       mediaKit.resumePlayback(completion: completion)
@@ -334,6 +362,58 @@ final class PlaybackService: NSObject {
   private var queue: [String] = []
   private var index = 0
   private var wantsPlayback = false
+  private var inBackground = UIApplication.shared.applicationState == .background
+  private var manualPiPSession: Int?
+  private var manualPiPDeadline: Double?
+  private var audioSessionActivated = false
+
+  private var manualPiPAllowsBackground: Bool {
+    BackgroundPlaybackPolicy.permitsPlayback(backgroundEnabled: false, inBackground: true,
+      session: generation, pipSession: manualPiPSession,
+      pipActive: pipActive, pipDeadline: manualPiPDeadline,
+      now: ProcessInfo.processInfo.systemUptime)
+  }
+
+  private var playbackEnvironmentAllowsPlayback: Bool {
+    BackgroundPlaybackPolicy.permitsPlayback(backgroundEnabled: background, inBackground: inBackground,
+      session: generation, pipSession: manualPiPSession,
+      pipActive: pipActive, pipDeadline: manualPiPDeadline,
+      now: ProcessInfo.processInfo.systemUptime)
+  }
+
+  private func authorizeManualPiP(seconds: Double) {
+    manualPiPSession = generation
+    manualPiPDeadline = ProcessInfo.processInfo.systemUptime + seconds
+  }
+
+  private func revokeManualPiP(enforce: Bool = true) {
+    manualPiPSession = nil
+    manualPiPDeadline = nil
+    avPlayerPiPAuthorized = false
+    if enforce { enforcePlaybackEnvironment() }
+  }
+
+  private func enforcePlaybackEnvironment() {
+    guard !playbackEnvironmentAllowsPlayback else { return }
+    if wantsPlayback || enginePlaying || audioRecoveryPending || resumeAfterInterruption {
+      pause()
+    } else {
+      deactivateAudioSessionIfIdle()
+      updateNowPlaying()
+    }
+  }
+
+  private func deactivateAudioSessionIfIdle() {
+    guard audioSessionActivated, !wantsPlayback, !enginePlaying,
+          !manualPiPAllowsBackground else { return }
+    do {
+      try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+      audioSessionActivated = false
+    } catch {
+      // A failed deactivation never grants playback intent or starts recovery.
+      lastDiagnostic = "audio session deactivation failed: \(error.localizedDescription)"
+    }
+  }
   private var interrupted = false
   private var resumeAfterInterruption = false
   // iOS 15/16 do not expose routeDisconnected; correlate the paired notifications briefly.
@@ -388,8 +468,7 @@ final class PlaybackService: NSObject {
     rate = Self.normalizedRate((defaults.object(forKey: "playback.rate") as? NSNumber)?.doubleValue ?? 1)
     mode = defaults.string(forKey: "playback.mode") ?? "folder"
     continuous = defaults.object(forKey: "playback.continuous") as? Bool ?? true
-    background = true
-    defaults.set(true, forKey: "playback.background")
+    background = defaults.object(forKey: "playback.background") as? Bool ?? true
     smartIntro = defaults.object(forKey: "playback.smartIntro") as? Bool ?? true
     rememberProgress = defaults.object(forKey: "playback.rememberProgress") as? Bool ?? true
     autoResume = defaults.object(forKey: "playback.resume") as? Bool ?? true
@@ -420,11 +499,18 @@ final class PlaybackService: NSObject {
     })
     notifications.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
       guard let self = self else { return }
+      self.inBackground = true
+      // Fence playback before a pending scrub/seek completion can resume it.
+      self.enforcePlaybackEnvironment()
       if self.scrubbing { self.cancelScrub() }
       self.persist()
     })
+    notifications.append(center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+      self?.inBackground = false
+    })
     notifications.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
       guard let self = self else { return }
+      self.inBackground = false
       self.restoreAVPlayerPresentationAfterBackground()
       if self.audioRecoveryPending { self.attemptAudioRecovery(resetAttempts: true) }
       self.tick()
@@ -465,7 +551,7 @@ final class PlaybackService: NSObject {
     return ["path": currentPath ?? "", "queue": queue, "index": index, "generation": generation,
       "revision": stateRevision, "wantsPlayback": wantsPlayback,
       "trackSelecting": trackSelection != nil, "engineId": mediaKit?.id ?? "",
-      "playing": enginePlaying, "loading": loading || isSeeking || (mediaKit?.buffering ?? (player.timeControlStatus == .waitingToPlayAtSpecifiedRate)),
+      "playing": wantsPlayback && playbackEnvironmentAllowsPlayback && enginePlaying, "loading": loading || isSeeking || (mediaKit?.buffering ?? (player.timeControlStatus == .waitingToPlayAtSpecifiedRate)),
       "seeking": isSeeking, "scrubbing": scrubbing, "isAudio": mediaIsAudio,
       "engine": mediaKit == nil ? "AVPlayer" : "media_kit", "engineNotice": engineNotice,
       "diagnostic": lastDiagnostic, "seekable": timelineReady && !seekFault && (mediaKit?.seekable ?? true),
@@ -542,6 +628,7 @@ final class PlaybackService: NSObject {
 
   private func load(resume: Bool, autoplay: Bool = true) {
     guard let path = currentPath else { return }
+    revokeManualPiP(enforce: false)
     cancelAudioRecovery()
     assetPreparationTask?.cancel()
     assetPreparationTask = nil
@@ -561,13 +648,13 @@ final class PlaybackService: NSObject {
     introSkipped = 0
     generation += 1
     let token = generation
-    player.pause(); timelineReady = false; loading = true; wantsPlayback = autoplay; errorMessage = ""
+    player.pause(); timelineReady = false; loading = true; wantsPlayback = autoplay && playbackEnvironmentAllowsPlayback; errorMessage = ""
     // An interruption belongs to the audio session, not to the media item. If the
     // user switches items while it is active, carry the new playback intent so an
     // eventual .ended notification resumes the new item instead of the old one.
     if interrupted {
-      resumeAfterInterruption = autoplay
-      audioRecoveryPending = autoplay
+      resumeAfterInterruption = wantsPlayback
+      audioRecoveryPending = wantsPlayback
     }
     observations = Array(observations.prefix(1))
     player.replaceCurrentItem(with: nil)
@@ -739,6 +826,7 @@ final class PlaybackService: NSObject {
 
   func play() {
     guard currentPath != nil else { return }
+    guard playbackEnvironmentAllowsPlayback else { enforcePlaybackEnvironment(); return }
     if mediaKit?.ended == true { load(resume: false); return }
     if seekFault || (mediaKit?.failure.isEmpty == false) { load(resume: true); return }
     if !timelineReady || loading || isSeeking || scrubbing { wantsPlayback = true; publish(); return }
@@ -749,6 +837,7 @@ final class PlaybackService: NSObject {
   }
 
   private func attemptAudioRecovery(resetAttempts: Bool = false) {
+    guard playbackEnvironmentAllowsPlayback else { enforcePlaybackEnvironment(); return }
     guard currentPath != nil, wantsPlayback else { cancelAudioRecovery(); return }
     guard timelineReady, !loading, !isSeeking, !scrubbing else {
       audioRecoveryPending = true
@@ -795,7 +884,7 @@ final class PlaybackService: NSObject {
       resumeEngine { [weak self] success in
         DispatchQueue.main.async {
           guard let self = self, self.generation == token, self.currentPath == path,
-                self.wantsPlayback else { return }
+                self.wantsPlayback, self.playbackEnvironmentAllowsPlayback else { return }
           if success {
             self.cancelAudioRecovery()
             self.errorMessage = ""
@@ -823,7 +912,7 @@ final class PlaybackService: NSObject {
   private func scheduleAudioRecoveryRetry() {
     audioRecoveryWorkItem?.cancel()
     audioRecoveryWorkItem = nil
-    guard audioRecoveryPending, wantsPlayback, !interrupted,
+    guard audioRecoveryPending, wantsPlayback, playbackEnvironmentAllowsPlayback, !interrupted,
           UIApplication.shared.applicationState == .active else { return }
     guard let delay = AudioRecoveryRetryPolicy.delay(forAttempt: audioRecoveryAttempt) else {
       // Do not leave recovery in a silent, permanently-pending state. Keep the
@@ -979,7 +1068,7 @@ final class PlaybackService: NSObject {
   }
 
   private func ended() {
-    guard wantsPlayback, initialPositionEstablished, !loading, !sessionCompleted else { return }
+    guard wantsPlayback, playbackEnvironmentAllowsPlayback, initialPositionEstablished, !loading, !sessionCompleted else { return }
     if let a = aPoint, bPoint != nil { seek(a); return }
     sessionCompleted = true
     persist()
@@ -1119,9 +1208,11 @@ final class PlaybackService: NSObject {
     }
     if let value = values["mode"] as? String, ["sequence", "folder", "one", "shuffle"].contains(value) { mode = value; continuous = true }
     if let value = values["continuous"] as? Bool { continuous = value }
-    if values["background"] != nil {
-      background = true
-      player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+    if let value = values["background"] as? Bool {
+      background = value
+      // Keep the AVPlayer/audio capability; the common service policy decides
+      // whether this particular session may actually play in the background.
+      enforcePlaybackEnvironment()
     }
     if let value = values["autoResume"] as? Bool { autoResume = value }
     if let value = values["rewindSeconds"] as? NSNumber {
@@ -1174,7 +1265,7 @@ final class PlaybackService: NSObject {
     }
     let defaults = UserDefaults.standard
     defaults.set(mode, forKey: "playback.mode")
-    defaults.set(continuous, forKey: "playback.continuous"); defaults.set(true, forKey: "playback.background"); defaults.set(autoResume, forKey: "playback.resume")
+    defaults.set(continuous, forKey: "playback.continuous"); defaults.set(background, forKey: "playback.background"); defaults.set(autoResume, forKey: "playback.resume")
     publish()
   }
 
@@ -1225,6 +1316,14 @@ final class PlaybackService: NSObject {
   }
 
   private func tick() {
+    // Starting PiP has a finite grace window. Restoring/retiring controllers
+    // and stale requests are never permission to keep background audio alive.
+    if manualPiPSession != nil && !manualPiPAllowsBackground {
+      revokeManualPiP()
+      if mediaKit != nil { discardMediaKitPiP(); restoreMediaKitVideoOutput() }
+      else { discardAVPlayerPiP(); suspendAVPlayerPresentationForBackground() }
+    }
+    enforcePlaybackEnvironment()
     captureRememberedProgress()
     checkTrackSelection()
     if let engine = mediaKit, !preparedMediaKit, !seekFault { mediaKitChanged(engine, token: generation) }
@@ -1268,6 +1367,7 @@ final class PlaybackService: NSObject {
   }
 
   private func fail(_ message: String) {
+    revokeManualPiP(enforce: false)
     cancelAudioRecovery()
     finishTrackSelection("track_selection_stale")
     cancelIntroDetection()
@@ -1312,7 +1412,7 @@ final class PlaybackService: NSObject {
       guard interrupted else { return }
       interrupted = false
       let options = AVAudioSession.InterruptionOptions(rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
-      let resume = resumeAfterInterruption && wantsPlayback && autoResume && options.contains(.shouldResume)
+      let resume = resumeAfterInterruption && wantsPlayback && playbackEnvironmentAllowsPlayback && autoResume && options.contains(.shouldResume)
       resumeAfterInterruption = false
       errorMessage = ""
       if resume {
@@ -1363,6 +1463,7 @@ final class PlaybackService: NSObject {
       try session.setCategory(.playback, mode: .moviePlayback, options: [])
     }
     try session.setActive(true)
+    audioSessionActivated = true
     interrupted = false
     resumeAfterInterruption = false
     routeLossRecoveryDeadline = 0
@@ -1595,13 +1696,16 @@ final class PlaybackService: NSObject {
     guard generation == token else { return }
     cancelIntroDetection()
     clearBoundary()
+    revokeManualPiP()
     discardAVPlayerPiP()
-    do {
-      try activateAudioSession()
-    } catch {
-      lastDiagnostic = error.localizedDescription
-      audioRecoveryPending = wantsPlayback
-      errorMessage = ""
+    if wantsPlayback && playbackEnvironmentAllowsPlayback {
+      do {
+        try activateAudioSession()
+      } catch {
+        lastDiagnostic = error.localizedDescription
+        audioRecoveryPending = wantsPlayback
+        errorMessage = ""
+      }
     }
     cancelSeeks()
     player.pause(); player.replaceCurrentItem(with: nil)
@@ -1677,6 +1781,9 @@ final class PlaybackService: NSObject {
   func receiveMediaKitState(_ state: [String: Any]) {
     guard let engine = mediaKit, state["engineId"] as? String == engine.id else { return }
     engine.update(state)
+    // A late transport snapshot cannot reauthorize audio after a native pause.
+    if !playbackEnvironmentAllowsPlayback { enforcePlaybackEnvironment() }
+    deactivateAudioSessionIfIdle()
   }
 
   func startPiP(delegate: AVPictureInPictureControllerDelegate, requestID: String? = nil) throws {
@@ -1692,6 +1799,7 @@ final class PlaybackService: NSObject {
       guard let requestID = requestID, !requestID.isEmpty else {
         throw LibraryFailure.app("pip_request_invalid")
       }
+      authorizeManualPiP(seconds: 28)
       mediaKitPiPPreparing = true
       mediaKitPiPRequestID = requestID
       let timeout = DispatchWorkItem { [weak self, weak mediaKit] in
@@ -1701,6 +1809,7 @@ final class PlaybackService: NSObject {
         self.mediaKitPiPPreparing = false
         self.mediaKitPiPRequestID = nil
         self.mediaKitPiPPreparationTimeout = nil
+        self.revokeManualPiP()
         self.notice?("pip_prepare_timeout")
         self.publish()
       }
@@ -1714,6 +1823,7 @@ final class PlaybackService: NSObject {
           self.mediaKitPiPPreparationTimeout = nil
           self.mediaKitPiPPreparing = false
           self.mediaKitPiPRequestID = nil
+          self.revokeManualPiP()
           self.notice?("pip_start_failed")
           self.publish()
         }
@@ -1732,6 +1842,7 @@ final class PlaybackService: NSObject {
         throw LibraryFailure.app("pip_temporarily_unavailable")
       }
       cancelPendingAVPlayerPiP()
+      authorizeManualPiP(seconds: 8)
       avPlayerPiPAuthorized = true
       pipStartIssued = true
       let activationTimeout = DispatchWorkItem { [weak self, weak controller] in
@@ -1744,6 +1855,7 @@ final class PlaybackService: NSObject {
         self.pipPossibleObservation?.invalidate()
         self.pipPossibleObservation = nil
         self.avPlayerPiPAuthorized = false
+        self.revokeManualPiP()
         self.retirePiP(controller)
         self.cancelPendingAVPlayerPiP()
         self.pip = nil
@@ -1761,6 +1873,7 @@ final class PlaybackService: NSObject {
   func finishAVPlayerPiP(_ controller: AVPictureInPictureController) {
     guard pip === controller else { return }
     avPlayerPiPAuthorized = false
+    revokeManualPiP()
     cancelPendingAVPlayerPiP()
     suspendAVPlayerPresentationForBackground()
     publish()
@@ -1817,6 +1930,7 @@ final class PlaybackService: NSObject {
       mediaKitPiPPreparationTimeout = nil
       mediaKitPiPPreparing = false
       mediaKitPiPRequestID = nil
+      revokeManualPiP()
       notice?("pip_page_closed")
       publish()
       completion(false)
@@ -1829,12 +1943,22 @@ final class PlaybackService: NSObject {
       mediaKitPiPPreparationTimeout = nil
       mediaKitPiPPreparing = false
       mediaKitPiPRequestID = nil
-      renderer.playRequested = { [weak self] in self?.play() }
+      let rendererGeneration = generation
+      renderer.playRequested = { [weak self, weak renderer] in
+        guard let self, let renderer, self.generation == rendererGeneration,
+              self.mediaKitPiP === renderer else { return }
+        self.play()
+      }
       renderer.diagnostic = { [weak engine = mediaKit] message in engine?.recordDiagnostic(message) }
-      renderer.pauseRequested = { [weak self] in self?.pause() }
+      renderer.pauseRequested = { [weak self, weak renderer] in
+        guard let self, let renderer, self.generation == rendererGeneration,
+              self.mediaKitPiP === renderer else { return }
+        self.pause()
+      }
       renderer.startTimedOut = { [weak self, weak renderer] in
         guard let self = self, let renderer = renderer, self.mediaKitPiP === renderer else { return }
         self.mediaKitPiPActiveRequestID = nil
+        self.revokeManualPiP()
         self.retirePiP(renderer.controller, renderer: renderer)
         self.mediaKitPiP = nil
         self.restoreMediaKitVideoOutput()
@@ -1876,6 +2000,7 @@ final class PlaybackService: NSObject {
       mediaKitPiPPreparationTimeout = nil
       mediaKitPiPPreparing = false
       mediaKitPiPRequestID = nil
+      revokeManualPiP()
       notice?("pip_output_takeover_failed")
       publish()
       completion(false)
@@ -1884,6 +2009,7 @@ final class PlaybackService: NSObject {
 
   func finishMediaKitPiP(_ controller: AVPictureInPictureController) {
     guard let renderer = mediaKitPiP, renderer.controller === controller else { return }
+    revokeManualPiP()
     renderer.stop()
     mediaKitPiP = nil
     mediaKitPiPActiveRequestID = nil
@@ -1904,6 +2030,7 @@ final class PlaybackService: NSObject {
       mediaKitPiPPreparationTimeout = nil
       mediaKitPiPPreparing = false
       mediaKitPiPRequestID = nil
+      revokeManualPiP()
       publish()
       completion(true)
       return
@@ -1927,6 +2054,7 @@ final class PlaybackService: NSObject {
       }
     }
     mediaKitPiPActiveRequestID = nil
+    revokeManualPiP()
     retirePiP(controller, renderer: renderer)
     mediaKitPiP = nil
     publish()
@@ -2001,7 +2129,7 @@ final class PlaybackService: NSObject {
     guard let a = aPoint, let b = bPoint else { return }
     let token = generation
     boundaryObserver = player.addBoundaryTimeObserver(forTimes: [NSValue(time: CMTime(seconds: b, preferredTimescale: 600))], queue: .main) { [weak self] in
-      guard let self = self, self.generation == token, self.wantsPlayback, !self.interrupted, !self.scrubbing, !self.isSeeking else { return }
+      guard let self = self, self.generation == token, self.wantsPlayback, self.playbackEnvironmentAllowsPlayback, !self.interrupted, !self.scrubbing, !self.isSeeking else { return }
       self.seek(a)
     }
   }
@@ -2016,9 +2144,9 @@ final class PlaybackService: NSObject {
       }
       remoteTargets.append((command, target))
     }
-    bind(center.playCommand) { [weak self] _ in guard let self = self, self.currentPath != nil else { return .noSuchContent }; self.play(); return .success }
+    bind(center.playCommand) { [weak self] _ in guard let self = self, self.currentPath != nil else { return .noSuchContent }; guard self.playbackEnvironmentAllowsPlayback else { return .commandFailed }; self.play(); return .success }
     bind(center.pauseCommand) { [weak self] _ in self?.pause(); return .success }
-    bind(center.togglePlayPauseCommand) { [weak self] _ in guard let self = self else { return .commandFailed }; self.wantsPlayback ? self.pause() : self.play(); return .success }
+    bind(center.togglePlayPauseCommand) { [weak self] _ in guard let self = self else { return .commandFailed }; guard self.wantsPlayback || self.playbackEnvironmentAllowsPlayback else { return .commandFailed }; self.wantsPlayback ? self.pause() : self.play(); return .success }
     bind(center.nextTrackCommand) { [weak self] _ in self?.skip(1); return .success }
     bind(center.previousTrackCommand) { [weak self] _ in self?.skip(-1); return .success }
     center.skipForwardCommand.preferredIntervals = [NSNumber(value: forwardSeconds)]
@@ -2035,7 +2163,7 @@ final class PlaybackService: NSObject {
       MPMediaItemPropertyAlbumTitle: URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent,
       MPMediaItemPropertyPlaybackDuration: duration,
       MPNowPlayingInfoPropertyElapsedPlaybackTime: position,
-      MPNowPlayingInfoPropertyPlaybackRate: enginePlaying ? rate : 0,
+      MPNowPlayingInfoPropertyPlaybackRate: wantsPlayback && playbackEnvironmentAllowsPlayback && enginePlaying ? rate : 0,
       MPNowPlayingInfoPropertyDefaultPlaybackRate: rate]
   }
 

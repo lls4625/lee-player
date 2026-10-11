@@ -1,6 +1,52 @@
 import XCTest
 @testable import Runner
 
+final class BackgroundPlaybackPolicyTests: XCTestCase {
+  private func allowed(enabled: Bool = false, background: Bool = true,
+                       session: Int = 4, pipSession: Int? = nil,
+                       active: Bool = false, deadline: Double? = nil,
+                       now: Double = 100) -> Bool {
+    BackgroundPlaybackPolicy.permitsPlayback(backgroundEnabled: enabled,
+      inBackground: background, session: session, pipSession: pipSession,
+      pipActive: active, pipDeadline: deadline, now: now)
+  }
+
+  func testNormalBackgroundAndLockHonorPreferenceForBothEngines() {
+    XCTAssertTrue(allowed(enabled: true))
+    XCTAssertFalse(allowed())
+  }
+
+  func testInactiveControlCenterAndPageReturnAreNotBackground() {
+    XCTAssertTrue(allowed(background: false))
+    XCTAssertTrue(allowed(enabled: true, background: false))
+  }
+
+  func testManualPiPStartupIsBoundedAndActiveSessionIsException() {
+    XCTAssertTrue(allowed(pipSession: 4, deadline: 101))
+    XCTAssertFalse(allowed(pipSession: 4, deadline: 100))
+    XCTAssertFalse(allowed(pipSession: 4, deadline: 99))
+    XCTAssertTrue(allowed(pipSession: 4, active: true, deadline: 99))
+  }
+
+  func testPiPFailureStopCancelAndRetirementCannotGrantPermission() {
+    XCTAssertFalse(allowed(active: true, deadline: 101))
+    XCTAssertFalse(allowed(pipSession: 4))
+    XCTAssertFalse(allowed(deadline: 101))
+  }
+
+  func testPiPExceptionNeverCrossesMediaSessions() {
+    XCTAssertFalse(allowed(pipSession: 3, active: true, deadline: 101))
+    XCTAssertFalse(allowed(pipSession: 3, deadline: 101))
+  }
+
+  func testTurningPreferenceOnOnlyChangesPermissionNotPlaybackIntent() {
+    for enabled in [false, true] {
+      let wantsPlayback = false
+      XCTAssertFalse(wantsPlayback && allowed(enabled: enabled))
+    }
+  }
+}
+
 final class NativeRecoveryPolicyTests: XCTestCase {
   private var temporary: URL!
 

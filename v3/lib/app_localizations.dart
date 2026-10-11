@@ -1035,10 +1035,20 @@ class AppLocalizations {
       'ja': 'バックグラウンドと中断',
       'en': 'Background & Interruptions',
     },
-    '后台播放始终开启': {
-      'zh-Hant': '背景播放一律開啟',
-      'ja': 'バックグラウンド再生は常に有効です',
-      'en': 'Background playback is always on',
+    '后台播放': {
+      'zh-Hant': '背景播放',
+      'ja': 'バックグラウンド再生',
+      'en': 'Background playback',
+    },
+    '开启时锁屏或切换应用继续播放；关闭时进入后台暂停，返回前台保持暂停': {
+      'zh-Hant': '開啟時鎖定畫面或切換 App 繼續播放；關閉時進入背景暫停，返回前景保持暫停',
+      'ja': 'オンでは画面ロックやアプリ切替後も再生。オフではバックグラウンド移行時に一時停止し、戻っても停止を維持します',
+      'en': 'On: continue when locked or in the background. Off: pause on entering the background and stay paused on return.',
+    },
+    '开关不会改变当前前台播放，开启不会自动播放。手动开启的画中画是本次会话的例外，可能在后台或锁屏时继续播放；不会自动进入画中画。中断后仅在中断前正在播放、且 iOS 允许时恢复。': {
+      'zh-Hant': '開關不會改變目前前景播放，開啟不會自動播放。手動開啟的子母畫面是本次工作階段的例外，可能在背景或鎖定畫面時繼續播放；不會自動進入子母畫面。中斷後僅在中斷前正在播放、且 iOS 允許時恢復。',
+      'ja': '切替は現在のフォアグラウンド再生に影響せず、オンにしても自動再生しません。手動で開始したピクチャ・イン・ピクチャは今回のセッションの例外で、バックグラウンドや画面ロック中も再生が続く場合があります。自動では開始しません。中断前に再生中で、iOS が許可した場合のみ再開します。',
+      'en': 'Changing this setting leaves foreground playback unchanged; turning it on never starts playback. Manually started Picture in Picture is an exception for the current session and may continue in the background or while locked. It never starts automatically. After interruptions, resume only if previously playing and iOS permits it.',
     },
     '中断恢复': {
       'zh-Hant': '中斷恢復',

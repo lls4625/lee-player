@@ -1000,7 +1000,11 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
 
   Widget preference(IconData icon, String title, String subtitle, String key) {
     final saving = savingPreferences.contains(key);
+    final enabled = key == 'background'
+        ? m.backgroundPlayback
+        : m.state[key] != false;
     return LeiGlassTile(
+      key: Key('preference-$key'),
       flat: true,
       leading:
           MediaQuery.sizeOf(context).width < 360 ||
@@ -1012,7 +1016,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         saving ? '正在保存…' : subtitle,
         style: Theme.of(context).textTheme.bodySmall,
       ),
-      onTap: saving ? null : () => savePreference(key, m.state[key] == false),
+      onTap: saving ? null : () => savePreference(key, !enabled),
       trailing: saving
           ? Semantics(
               label: AppLocalizations.of(context).text(
@@ -1025,7 +1029,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
               ),
             )
           : GlassSwitch(
-              value: m.state[key] != false,
+              value: enabled,
               onChanged: (value) => savePreference(key, value),
             ),
     );
@@ -1265,11 +1269,11 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         jumpSecondsPreference(Icons.forward_rounded, '前进秒数', 'forwardSeconds'),
       ], footer: '关闭后不保存或显示列表进度，再次打开课程不恢复历史断点；已有记录保留，当前播放与继续播放卡片不受影响。重新开启后按当前有效进度记录，不跳回旧断点。断点续播优先于片头跳过；倍速与循环模式可在播放页调整。'),
       () => settingSection('后台与中断', [
-        const LeiGlassTile(
-          flat: true,
-          leading: LeiMediaIcon(icon: Icons.headphones_rounded),
-          title: LText('后台播放始终开启'),
-          subtitle: LText('锁屏或切换应用时继续播放音频；不会自动进入画中画'),
+        preference(
+          Icons.headphones_rounded,
+          '后台播放',
+          '开启时锁屏或切换应用继续播放；关闭时进入后台暂停，返回前台保持暂停',
+          'background',
         ),
         preference(
           Icons.play_circle_outline,
@@ -1277,7 +1281,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           '通话结束后尝试恢复播放',
           'autoResume',
         ),
-      ], footer: '仅在中断前正在播放、且 iOS 允许时恢复。'),
+      ], footer: '开关不会改变当前前台播放，开启不会自动播放。手动开启的画中画是本次会话的例外，可能在后台或锁屏时继续播放；不会自动进入画中画。中断后仅在中断前正在播放、且 iOS 允许时恢复。'),
       () => settingSection('文件与记录', [
         LeiGlassTile(
           flat: true,

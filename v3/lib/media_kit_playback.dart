@@ -93,6 +93,8 @@ class MediaKitPlayback extends ChangeNotifier {
       call.method == 'stop' && _requestedId == null;
     if (barrier) {
       _commandEpoch++;
+      _playIntent.clear();
+      _seekIntent.clear();
       _repairGeneration++;
       _playRepairs.clear();
       _seekRepairs.clear();
@@ -125,7 +127,7 @@ class MediaKitPlayback extends ChangeNotifier {
       }
     }
     final result = Completer<bool>();
-    _commands = _commands.then((_) async {
+    Future<void> runCommand() async {
       try {
         final value = await _execute(call.method, args, permit).timeout(_commandTimeout(call.method));
         if (!result.isCompleted) result.complete(value);
@@ -150,7 +152,13 @@ class MediaKitPlayback extends ChangeNotifier {
         _activePermits.remove(permit);
         if (requestId != null && identical(_controlPermits[requestId], permit)) _controlPermits.remove(requestId);
       }
-    });
+    }
+    // Pause is a safety command: do not let a pending PiP/seek/plugin Future
+    // postpone it. Intent was recorded synchronously above, so queued play
+    // commands are already obsolete before this operation reaches the player.
+    _commands = dispatchMediaKitCommand(
+      _commands, runCommand, priority: call.method == 'pause',
+    );
     return result.future;
   }
 
@@ -228,11 +236,13 @@ class MediaKitPlayback extends ChangeNotifier {
       case 'play':
       case 'pause':
         final intent = args['_playIntent'] as int;
-        if (method == 'play') { await player.play(); } else { await player.pause(); }
-        if (!_allows(permit, id, player) || !_playIntent.isLatest(intent)) {
-          _scheduleLatestPlayIntent(player, id);
-          return false;
-        }
+        final applied = await _playIntent.applyIfLatest(
+          intent,
+          isAllowed: () => _allows(permit, id, player),
+          apply: () => method == 'play' ? player.play() : player.pause(),
+          onSuperseded: () => _scheduleLatestPlayIntent(player, id),
+        );
+        if (!applied) return false;
         break;
       case 'rate':
         final previousRate = player.state.rate;
@@ -499,6 +509,7 @@ class MediaKitPlayback extends ChangeNotifier {
     if (!target.isFinite || target < 0) return false;
     final native = player.platform as NativePlayer;
     await player.pause();
+    if (!_allows(permit, id, player) || !_seekIntent.isLatest(intent)) return false;
     await native.command(['seek', target.toStringAsFixed(6), 'absolute+exact']);
     if (!_allows(permit, id, player) || !_seekIntent.isLatest(intent)) {
       _scheduleLatestSeekIntent(player, id);
@@ -757,6 +768,8 @@ class MediaKitPlayback extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true; _requestedId = null;
+    _playIntent.clear();
+    _seekIntent.clear();
     _channel.setMethodCallHandler(null);
     _timer?.cancel();
     _commandEpoch++;

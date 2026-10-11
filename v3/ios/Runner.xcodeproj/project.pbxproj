@@ -18,6 +18,8 @@
 		AA1000000000000000000001 /* DeveloperTipsStoreKitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000001 /* DeveloperTipsStoreKitTests.swift */; };
 		AA1000000000000000000002 /* DeveloperTips.storekit in Resources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000007 /* DeveloperTips.storekit */; };
 		AA1000000000000000000003 /* NativeRecoveryPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000003 /* NativeRecoveryPolicyTests.swift */; };
+		AA1000000000000000000004 /* PlaybackSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000004 /* PlaybackSessionTests.swift */; };
+		AA1000000000000000000005 /* MediaKitPiPSeekTests.m in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000005 /* MediaKitPiPSeekTests.m */; };
 		AE1100000000000000000001 /* CourseLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000001 /* CourseLibrary.swift */; };
 		AE1100000000000000000002 /* PlaybackService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000002 /* PlaybackService.swift */; };
 		AE1100000000000000000003 /* PlayerBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000003 /* PlayerBridge.swift */; };
@@ -25,8 +27,6 @@
 		AE1100000000000000000006 /* DeveloperTipPurchase.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000006 /* DeveloperTipPurchase.swift */; };
 		AE1100000000000000000007 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = AE2200000000000000000008 /* PrivacyInfo.xcprivacy */; };
 		B4155353CB543B99CDBD1E8F /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F4E9B9CB95E1DDFF924E1856 /* Pods_Runner.framework */; };
-		AA1000000000000000000004 /* PlaybackSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000004 /* PlaybackSessionTests.swift */; };
-		AA1000000000000000000005 /* MediaKitPiPSeekTests.m in Sources */ = {isa = PBXBuildFile; fileRef = AA2000000000000000000005 /* MediaKitPiPSeekTests.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -73,6 +73,8 @@
 		AA2000000000000000000001 /* DeveloperTipsStoreKitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeveloperTipsStoreKitTests.swift; sourceTree = "<group>"; };
 		AA2000000000000000000002 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA2000000000000000000003 /* NativeRecoveryPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRecoveryPolicyTests.swift; sourceTree = "<group>"; };
+		AA2000000000000000000004 /* PlaybackSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackSessionTests.swift; sourceTree = "<group>"; };
+		AA2000000000000000000005 /* MediaKitPiPSeekTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MediaKitPiPSeekTests.m; sourceTree = "<group>"; };
 		AE2200000000000000000001 /* CourseLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CourseLibrary.swift; sourceTree = "<group>"; };
 		AE2200000000000000000002 /* PlaybackService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackService.swift; sourceTree = "<group>"; };
 		AE2200000000000000000003 /* PlayerBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerBridge.swift; sourceTree = "<group>"; };
@@ -83,8 +85,6 @@
 		AE2200000000000000000008 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		F4E9B9CB95E1DDFF924E1856 /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		FAF9FF1A33363CC6BE97EC5E /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
-		AA2000000000000000000004 /* PlaybackSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackSessionTests.swift; sourceTree = "<group>"; };
-		AA2000000000000000000005 /* MediaKitPiPSeekTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MediaKitPiPSeekTests.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -266,7 +266,7 @@
 			);
 			mainGroup = 97C146E51CF9000F007C117D;
 			packageReferences = (
-				781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */,
+				781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "FlutterGeneratedPluginSwiftPackage" */,
 			);
 			productRefGroup = 97C146EF1CF9000F007C117D /* Products */;
 			projectDirPath = "";
@@ -363,13 +363,9 @@
 			inputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks-${CONFIGURATION}-input-files.xcfilelist",
 			);
-			inputPaths = (
-			);
 			name = "[CP] Embed Pods Frameworks";
 			outputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -757,7 +753,7 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */ = {
+		781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "FlutterGeneratedPluginSwiftPackage" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage;
 		};

@@ -1,15 +1,18 @@
 import XCTest
 import AVFoundation
+import UIKit
 @testable import Runner
 
 private final class PlaybackTestTransport {
   var requestedSeeks: [Double] = []
+  var commands: [String] = []
   var holdSeeks = false
   var holdSubtitles = false
   var seeks: [(seconds: Double, finish: (Bool) -> Void)] = []
   var subtitles: [(Bool) -> Void] = []
 
   func send(_ method: String, _ arguments: [String: Any], _ finish: @escaping (Bool) -> Void) {
+    commands.append(method)
     if method == "seek" { requestedSeeks.append(arguments["seconds"] as? Double ?? -1) }
     if method == "seek", holdSeeks {
       seeks.append((arguments["seconds"] as? Double ?? -1, finish))
@@ -26,7 +29,7 @@ final class PlaybackSessionTests: XCTestCase {
   private var library: CourseLibrary!
   private var testTransport: PlaybackTestTransport!
   private var savedDefaults: [String: Any] = [:]
-  private let preferenceKeys = ["playback.rememberProgress", "playback.smartIntro", "playback.continuous"]
+  private let preferenceKeys = ["playback.rememberProgress", "playback.smartIntro", "playback.continuous", "playback.background"]
 
   override func setUpWithError() throws {
     for key in preferenceKeys {
@@ -35,6 +38,7 @@ final class PlaybackSessionTests: XCTestCase {
     UserDefaults.standard.set(true, forKey: "playback.rememberProgress")
     UserDefaults.standard.set(false, forKey: "playback.smartIntro")
     UserDefaults.standard.set(false, forKey: "playback.continuous")
+    UserDefaults.standard.set(true, forKey: "playback.background")
     temporary = FileManager.default.temporaryDirectory
       .appendingPathComponent("LeiPlayerPlaybackTests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -47,6 +51,78 @@ final class PlaybackSessionTests: XCTestCase {
     }
     savedDefaults.removeAll()
     try? FileManager.default.removeItem(at: temporary)
+  }
+
+  func testBackgroundPreferencePersistsFalseAcrossServiceCreation() throws {
+    let service = try makeService(PlaybackTestTransport(), prepare: false)
+    configureBackground(service, enabled: false)
+    XCTAssertEqual(service.snapshot()["background"] as? Bool, false)
+    XCTAssertEqual(UserDefaults.standard.object(forKey: "playback.background") as? Bool, false)
+    let restored = PlaybackService(library: library)
+    XCTAssertEqual(restored.snapshot()["background"] as? Bool, false)
+  }
+
+  func testDisablingInForegroundDoesNotCancelCurrentIntent() throws {
+    let service = try makeService(PlaybackTestTransport(), prepare: false)
+    NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+    configureBackground(service, enabled: false)
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, true)
+  }
+
+  func testInactiveDoesNotPauseButActualBackgroundDoesAndReturnStaysPaused() throws {
+    let service = try makeService(PlaybackTestTransport(), prepare: false)
+    NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+    configureBackground(service, enabled: false)
+    NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, true)
+    NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, false)
+    XCTAssertTrue(testTransport.commands.contains("pause"))
+    NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+    NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, false)
+  }
+
+  func testEnabledBackgroundKeepsPendingPlaybackIntent() throws {
+    let service = try makeService(PlaybackTestTransport(), prepare: false)
+    NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, true)
+  }
+
+  func testOffBackgroundRejectsPlayAndNextLoadsPaused() throws {
+    let service = try makeService(PlaybackTestTransport(), prepare: false)
+    configureBackground(service, enabled: false)
+    NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+    service.play()
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, false)
+    service.skip(1)
+    XCTAssertEqual(service.currentPath, "b.mkv")
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, false)
+  }
+
+  func testEnablingAfterPolicyPauseNeverStartsPlayback() throws {
+    let service = try makeService(PlaybackTestTransport(), prepare: false)
+    configureBackground(service, enabled: false)
+    NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+    configureBackground(service, enabled: true)
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, false)
+    XCTAssertFalse(testTransport.commands.contains("play"))
+  }
+
+  func testPendingSeekCompletionAfterBackgroundCannotResume() throws {
+    let transport = PlaybackTestTransport()
+    let service = try makeService(transport)
+    NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+    transport.holdSeeks = true
+    service.seek(35)
+    service.play()
+    configureBackground(service, enabled: false)
+    NotificationCenter.default.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+    let playsBeforeCompletion = transport.commands.filter { $0 == "play" }.count
+    transport.seeks.last?.finish(true)
+    drainMainQueue()
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, false)
+    XCTAssertEqual(transport.commands.filter { $0 == "play" }.count, playsBeforeCompletion)
   }
 
   private func makeService(_ transport: PlaybackTestTransport, remember: Bool = true,
@@ -113,6 +189,15 @@ final class PlaybackSessionTests: XCTestCase {
     library.recordStore.readPlaybackRecord(path: "a.mkv") { result = $0; read.fulfill() }
     wait(for: [read], timeout: 2)
     return result
+  }
+
+  private func configureBackground(_ service: PlaybackService, enabled: Bool) {
+    let configured = expectation(description: "background preference saved")
+    service.requestConfiguration(["background": enabled]) { error in
+      XCTAssertNil(error)
+      configured.fulfill()
+    }
+    wait(for: [configured], timeout: 2)
   }
 
   private func configure(_ service: PlaybackService, remember: Bool) {

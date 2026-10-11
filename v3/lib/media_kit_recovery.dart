@@ -29,6 +29,17 @@ MediaKitRuntimeErrorKind classifyMediaKitRuntimeError(String message) {
       : MediaKitRuntimeErrorKind.recoverable;
 }
 
+/// Priority pause bypasses slow PiP/seek work without unblocking that queue.
+/// The caller handles errors and uses intent/session guards for late work.
+Future<void> dispatchMediaKitCommand(Future<void> queued,
+    Future<void> Function() command, {bool priority = false}) {
+  if (priority) {
+    unawaited(command());
+    return queued;
+  }
+  return queued.then((_) => command());
+}
+
 class MediaKitCommandPermit {
   bool _valid = true;
 
@@ -50,6 +61,29 @@ class MediaKitLatestIntent<T> {
   }
 
   bool isLatest(int version) => version == _version;
+
+  /// Invalidates captured intent when its playback session ends.
+  void clear() {
+    _value = null;
+    _version++;
+  }
+
+  /// A queued operation must still be wanted before touching the player.
+  /// Recheck on completion too: a plugin Future cannot be cancelled when a
+  /// priority pause or session barrier overtakes it.
+  Future<bool> applyIfLatest(int version, {
+    required bool Function() isAllowed,
+    required Future<void> Function() apply,
+    required void Function() onSuperseded,
+  }) async {
+    if (!isLatest(version) || !isAllowed()) return false;
+    try {
+      await apply();
+      return isLatest(version) && isAllowed();
+    } finally {
+      if (!isLatest(version) || !isAllowed()) onSuperseded();
+    }
+  }
 }
 
 /// Serializes disposal attempts and keeps failed/timed-out cleanup as a gate.
