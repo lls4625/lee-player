@@ -42,6 +42,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
   private var pipRestoreCompletion: ((Bool) -> Void)?
   private var pipRestoreToken: UUID?
+  private weak var pipRestoreController: AVPictureInPictureController?
   private var pendingMediaKitPiPSourceView: UIView?
   private var pendingMediaKitPiPToken: UUID?
   private let registrar: FlutterPluginRegistrar
@@ -568,9 +569,15 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
           received: args["restoreToken"] as? String) else {
           result(failure(LibraryFailure.app("pip_restore_stale"))); return
         }
+        guard let controller = pipRestoreController, playback.allowsPiPRestore(controller) else {
+          pipRestoreCompletion?(false)
+          pipRestoreCompletion = nil; pipRestoreToken = nil; pipRestoreController = nil
+          result(failure(LibraryFailure.app("pip_restore_stale"))); return
+        }
         pipRestoreCompletion?(true)
         pipRestoreCompletion = nil
         pipRestoreToken = nil
+        pipRestoreController = nil
       case "pip":
         let pipToken = UUID()
         pendingMediaKitPiPToken = playback.usesMediaKit ? pipToken : nil
@@ -657,6 +664,10 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   }
 
   func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+    guard playback.allowsPiPRestore(pictureInPictureController) else {
+      completionHandler(false)
+      return
+    }
     guard sink != nil else {
       pipRestoreCompletion?(false)
       pipRestoreCompletion = nil
@@ -667,6 +678,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     pipRestoreCompletion?(false)
     let token = UUID()
     pipRestoreToken = token
+    pipRestoreController = pictureInPictureController
     pipRestoreCompletion = completionHandler
     sink?(["type": "openPlayer", "restoreToken": token.uuidString])
     DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
@@ -674,6 +686,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       self?.pipRestoreCompletion?(false)
       self?.pipRestoreCompletion = nil
       self?.pipRestoreToken = nil
+      self?.pipRestoreController = nil
     }
   }
 

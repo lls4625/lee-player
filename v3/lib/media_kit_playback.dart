@@ -18,6 +18,7 @@ class MediaKitPlayback extends ChangeNotifier {
   int _commandEpoch = 0;
   final Set<MediaKitCommandPermit> _activePermits = {};
   int _refreshEpoch = 0;
+  final MediaKitSnapshotFence _snapshots = MediaKitSnapshotFence();
   final MediaKitLatestIntent<bool> _playIntent = MediaKitLatestIntent<bool>();
   final MediaKitLatestIntent<double> _seekIntent = MediaKitLatestIntent<double>();
   final MediaKitCleanupCoordinator _cleanup = MediaKitCleanupCoordinator();
@@ -79,16 +80,33 @@ class MediaKitPlayback extends ChangeNotifier {
     final args = Map<String, dynamic>.from(call.arguments as Map? ?? {});
     final id = args['engineId'] as String?;
     final requestId = args['requestId'] as String?;
+    // Fence existing reads immediately, not when this command eventually runs.
+    if (call.method == 'open' || call.method == 'seek') {
+      final positionVersion = args['positionVersion'];
+      if (positionVersion is! int || positionVersion < 0) {
+        return Future<bool>.value(false);
+      }
+      if (call.method == 'open') {
+        if (id == null || id.isEmpty) return Future<bool>.value(false);
+        _snapshots.beginSession(positionVersion);
+      } else if (id != null && id == _requestedId) {
+        if (!_snapshots.recordPositionVersion(positionVersion)) {
+          return Future<bool>.value(false);
+        }
+      }
+    }
     if (call.method == 'invalidateControl') {
-      if (id == _requestedId && requestId != null) {
+      if (id != null && id == _requestedId && requestId != null) {
         _controlPermits[requestId]?.invalidate();
-        _failure = 'playback_control_failed';
-        unawaited(_publishFailure());
+        unawaited(_publishFailure('playback_control_failed', id: id));
       }
       return Future<bool>.value(true);
     }
     if (call.method == 'open') _requestedId = id;
-    if (call.method == 'release' || call.method == 'stop' && _requestedId == id) _requestedId = null;
+    if (call.method == 'release' || call.method == 'stop' && _requestedId == id) {
+      _requestedId = null;
+      _snapshots.invalidateSession();
+    }
     final barrier = call.method == 'open' || call.method == 'release' ||
       call.method == 'stop' && _requestedId == null;
     if (barrier) {
@@ -136,16 +154,14 @@ class MediaKitPlayback extends ChangeNotifier {
         // late continuation cannot publish state or install a heartbeat.
         permit.invalidate();
         _log('${call.method}: $error');
-        if (call.method == 'open' && _requestedId == id && epoch == _commandEpoch) {
-          _failure = 'media_kit_open_failed';
-          await _publishFailure();
+        if (call.method == 'open' && id != null && _requestedId == id && epoch == _commandEpoch) {
+          await _publishFailure('media_kit_open_failed', id: id);
         }
         if (error is TimeoutException && const {'rate', 'volume', 'loop', 'subtitle'}.contains(call.method) &&
-            _requestedId == id && epoch == _commandEpoch) {
+            id != null && _requestedId == id && epoch == _commandEpoch) {
           // A timed-out plugin write is not cancelled. Quarantine this session
           // instead of allowing a late write to overwrite subsequent controls.
-          _failure = 'playback_control_failed';
-          await _publishFailure();
+          await _publishFailure('playback_control_failed', id: id);
         }
         if (!result.isCompleted) result.complete(false);
       } finally {
@@ -193,7 +209,8 @@ class MediaKitPlayback extends ChangeNotifier {
       }
       notifyListeners();
       _subscriptions.add(player.stream.error.listen((message) {
-        unawaited(_handleRuntimeError(player, id, message));
+        final origin = _snapshots.capture();
+        unawaited(_handleRuntimeError(player, id, message, origin));
       }));
       _subscriptions.add(player.stream.log.listen((entry) { _log('${entry.prefix}: ${entry.text}'); }));
       final native = player.platform as NativePlayer;
@@ -230,7 +247,13 @@ class MediaKitPlayback extends ChangeNotifier {
     if (player == null || engineId != id || _releasing) return false;
     if (method == 'stop') return _release();
     if (_requestedId != id) return false;
-    if (_failure.isNotEmpty && method != 'pause') return false;
+    if (_failure.isNotEmpty && method != 'pause') {
+      // The native side may have advanced its seek version before our earlier
+      // failure message arrived. A confirmed failure remains current until the
+      // session ends, even when its original envelope was superseded.
+      await _publishFailure(_failure, id: id, player: player);
+      return false;
+    }
     final native = player.platform as NativePlayer;
     switch (method) {
       case 'play':
@@ -344,8 +367,7 @@ class MediaKitPlayback extends ChangeNotifier {
             try { await _restorePiPVideoOutput(player, native, id); }
             catch (restoreError) {
               _log('pip output rollback failed: $restoreError');
-              _failure = 'pip_restore_failed';
-              await _publishFailure();
+              await _publishFailure('pip_restore_failed', id: id, player: player);
             }
           } else if (!handoffBegan && _sameSession(player, id)) {
             try { await _restoreVideoTrack(native); }
@@ -401,8 +423,7 @@ class MediaKitPlayback extends ChangeNotifier {
       if (_sameSession(player, id)) {
         try { await restore(); }
         catch (_) {
-          _failure = 'playback_control_failed';
-          await _publishFailure();
+          await _publishFailure('playback_control_failed', id: id, player: player);
         }
       }
       rethrow;
@@ -436,11 +457,10 @@ class MediaKitPlayback extends ChangeNotifier {
       }
     }
     if (_sameSession(player, id)) {
-      _failure = 'pip_restore_failed';
-      await _publishFailure(id);
+      await _publishFailure('pip_restore_failed', id: id, player: player);
       // An unverified native PiP owner and an inline output must never coexist.
       // Full release is the conservative fallback when the keyed abort fails.
-      await _release();
+      if (_sameSession(player, id)) await _release();
     }
   }
 
@@ -637,15 +657,16 @@ class MediaKitPlayback extends ChangeNotifier {
     }
   }
 
-  Future<void> _handleRuntimeError(Player player, String id, String message) async {
-    if (_disposed || _player != player || _requestedId != id) return;
+  Future<void> _handleRuntimeError(Player player, String id, String message,
+      MediaKitSnapshotStamp origin) async {
+    if (!_sameSession(player, id) || !_snapshots.isCurrent(origin)) return;
     _log('runtime: $message');
     if (classifyMediaKitRuntimeError(message) != MediaKitRuntimeErrorKind.fatal) return;
-    _failure = 'media_kit_open_failed';
     _ready = false;
     _timer?.cancel();
     _timer = null;
-    await _publishFailure(id);
+    await _publishFailure('media_kit_open_failed',
+        id: id, player: player, origin: origin);
   }
 
   Future<String?> _property(NativePlayer native, String name) async {
@@ -661,6 +682,7 @@ class MediaKitPlayback extends ChangeNotifier {
 
   Future<void> _refresh(Player player, String id) async {
     if (_disposed || _releasing || _player != player || _requestedId != id) return;
+    final snapshot = _snapshots.capture();
     final native = player.platform as NativePlayer;
     final values = await Future.wait([
       _property(native, 'time-pos'), _property(native, 'duration'),
@@ -671,6 +693,7 @@ class MediaKitPlayback extends ChangeNotifier {
       _property(native, 'frame-drop-count'), _property(native, 'speed'),
     ]);
     if (_disposed || _releasing || _player != player || _requestedId != id) return;
+    if (!_snapshots.accept(snapshot)) return;
     final state = player.state;
     final audio = state.tracks.audio.where((track) => track.id != 'auto' && track.id != 'no').toList();
     final subtitles = state.tracks.subtitle.where((track) => track.id != 'auto' && track.id != 'no').toList();
@@ -696,7 +719,10 @@ class MediaKitPlayback extends ChangeNotifier {
     final position = double.tryParse(values[0] ?? '') ?? state.position.inMicroseconds / 1000000;
     final duration = double.tryParse(values[1] ?? '') ?? state.duration.inMicroseconds / 1000000;
     await _channel.invokeMethod<bool>('state', {
-      'engineId': id, 'position': position.isFinite ? position : 0,
+      'engineId': id,
+      'positionVersion': snapshot.positionVersion,
+      'snapshotSequence': snapshot.snapshotSequence,
+      'position': position.isFinite ? position : 0,
       'duration': duration.isFinite ? duration : 0, 'ready': _ready,
       'seekable': mediaKitSeekability(values[2]),
       'playing': values[5] == null
@@ -711,11 +737,26 @@ class MediaKitPlayback extends ChangeNotifier {
     }).timeout(const Duration(seconds: 2));
   }
 
-  Future<void> _publishFailure([String? sessionId]) async {
-    final id = sessionId ?? engineId;
+  Future<void> _publishFailure(String failure, {
+    required String id,
+    Player? player,
+    MediaKitSnapshotStamp? origin,
+  }) async {
+    if (_disposed || _requestedId != id ||
+        (player != null && _player != player)) return;
+    final snapshot = origin == null
+        ? _snapshots.capture() : _snapshots.captureFailure(origin);
+    if (snapshot == null || !_snapshots.accept(snapshot)) return;
+    // Gate mutation as well as publication: a stale error must not leak into a
+    // later, otherwise-current heartbeat through the shared failure field.
+    _failure = failure;
     try {
-      await _channel.invokeMethod<bool>('state', {'engineId': id, 'failure': _failure})
-          .timeout(const Duration(seconds: 2));
+      await _channel.invokeMethod<bool>('state', {
+        'engineId': id,
+        'positionVersion': snapshot.positionVersion,
+        'snapshotSequence': snapshot.snapshotSequence,
+        'failure': failure,
+      }).timeout(const Duration(seconds: 2));
     } catch (_) {}
   }
 
@@ -768,6 +809,7 @@ class MediaKitPlayback extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true; _requestedId = null;
+    _snapshots.invalidateSession();
     _playIntent.clear();
     _seekIntent.clear();
     _channel.setMethodCallHandler(null);

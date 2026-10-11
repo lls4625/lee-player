@@ -24,12 +24,72 @@ struct BackgroundPlaybackPolicy {
   }
 }
 
+/// EOF notifications have item identity, but no trustworthy playback-pass ID.
+/// Treat them as hints; only the current, settled timeline can consume one.
+struct PlaybackEndGate {
+  private(set) var candidate = false
+  private(set) var armed = true
+  private(set) var explicitEndOperation: Int?
+  private(set) var consumedOperation: Int?
+
+  static func tolerance(_ duration: Double) -> Double { min(0.005, duration * 0.001) }
+  static func isAtEnd(_ position: Double, duration: Double) -> Bool {
+    duration.isFinite && duration > 0 && position.isFinite && position > 0
+      && position >= duration - tolerance(duration)
+  }
+  static func seekTarget(_ seconds: Double, duration: Double) -> Double {
+    min(max(0, duration - 0.001), max(0, seconds))
+  }
+  mutating func offer() { candidate = true }
+  mutating func beginOperation() { explicitEndOperation = nil }
+  mutating func settled(operation: Int, rawTarget: Double, position: Double, duration: Double) {
+    guard duration.isFinite, duration > 0, position.isFinite else { return }
+    // The raw target is retained before clamp; a near-end seek is not EOF.
+    if rawTarget >= duration,
+       abs(position - Self.seekTarget(rawTarget, duration: duration)) <= max(0.002, Self.tolerance(duration)) {
+      explicitEndOperation = operation
+    } else {
+      explicitEndOperation = nil
+      if !Self.isAtEnd(position, duration: duration) {
+        candidate = false; armed = true; consumedOperation = nil
+      }
+    }
+  }
+  mutating func consume(operation: Int, position: Double, duration: Double) -> Bool {
+    if explicitEndOperation == operation, consumedOperation != operation {
+      candidate = false; armed = false; consumedOperation = operation
+      explicitEndOperation = nil
+      return true
+    }
+    guard candidate else { return false }
+    candidate = false
+    guard armed, Self.isAtEnd(position, duration: duration) else { return false }
+    armed = false; consumedOperation = operation
+    return true
+  }
+}
+
+/// Shared wire contract with MediaKitSnapshotFence on the Dart side.
+struct PlaybackSnapshotGate {
+  private(set) var positionVersion = 0
+  private(set) var sequence = -1
+  mutating func advance() { positionVersion += 1; sequence = -1 }
+  mutating func accepts(_ state: [String: Any]) -> Bool {
+    guard let version = state["positionVersion"] as? NSNumber,
+      let next = state["snapshotSequence"] as? NSNumber,
+      version.intValue == positionVersion, next.intValue > sequence else { return false }
+    sequence = next.intValue
+    return true
+  }
+}
+
 final class LeeMediaKitEngine {
   let id = UUID().uuidString
   var changed: (() -> Void)?
   private let transport: (String, [String: Any], @escaping (Bool) -> Void) -> Void
   private var opened = false
   private var stopped = false
+  private var snapshots = PlaybackSnapshotGate()
   private let startedAt = ProcessInfo.processInfo.systemUptime
   private var controls: [String] = []
   private var engineDiagnostics: [String: Any] = [:]
@@ -67,6 +127,8 @@ final class LeeMediaKitEngine {
     guard !stopped else { completion?(false); return }
     var args = arguments
     args["engineId"] = id
+    args["positionVersion"] = snapshots.positionVersion
+    if args["requestId"] == nil { args["requestId"] = UUID().uuidString }
     transport(method, args) { [weak self] success in
       guard let self = self, !self.stopped else { completion?(false); return }
       if !success {
@@ -97,6 +159,8 @@ final class LeeMediaKitEngine {
   }
 
   func seek(seconds: Double, completion: @escaping (Bool) -> Void) {
+    snapshots.advance()
+    ended = false
     send("seek", ["seconds": seconds], completion: completion)
   }
 
@@ -129,7 +193,7 @@ final class LeeMediaKitEngine {
   }
 
   func update(_ state: [String: Any]) {
-    guard !stopped else { return }
+    guard !stopped, snapshots.accepts(state) else { return }
     if let value = state["position"] as? NSNumber, value.doubleValue.isFinite { position = max(0, value.doubleValue) }
     if let value = state["duration"] as? NSNumber, value.doubleValue.isFinite { duration = max(0, value.doubleValue) }
     if let value = state["playing"] as? Bool { playing = value }
@@ -158,7 +222,7 @@ final class PlaybackService: NSObject {
     !engineID.isEmpty && !requestID.isEmpty
       && engineID == currentEngineID && requestID == currentRequestID
   }
-  let player = AVPlayer()
+  private(set) var player = AVPlayer()
   var mediaKitTransport: ((String, [String: Any], @escaping (Bool) -> Void) -> Void)?
   private var mediaKit: LeeMediaKitEngine?
   var restoreRequested: (() -> Void)?
@@ -171,10 +235,22 @@ final class PlaybackService: NSObject {
   private var initialHistoricalSeekPending = false
   private var nonSeekableStartPosition: Double?
   private var sessionCompleted = false
+  private var atPlaybackEnd = false
+  private var pendingEndAction = false
   private var lastValidRememberedProgress: [String: Any]?
   private var mediaVolume: Float
   private var mediaBrightness: CGFloat
   private var seekSequence = 0
+  private var playbackOperation = 0
+  private var endGate = PlaybackEndGate()
+  private var replayOperation: Int?
+  private var lifecycleEvents: [String] = []
+  private var playerCreations = 1
+  private var itemCreations = 0
+  private var pipCreations = 0
+  private var pendingReplacement: (id: UUID, controller: AVPictureInPictureController, resume: Bool, autoplay: Bool, clearOnly: Bool, aborted: Bool)?
+  private var replacementTimeout: DispatchWorkItem?
+  private var cancellingSeeks = false
   private var activeSeek: Int?
   private var pendingSeek: (id: Int, seconds: Double, precise: Bool, done: (Bool) -> Void)?
   private var activeSeekCompletion: ((Bool) -> Void)?
@@ -285,6 +361,8 @@ final class PlaybackService: NSObject {
     controller.delegate = pipDelegate
     controller.canStartPictureInPictureAutomaticallyFromInline = false
     pip = controller
+    pipCreations += 1
+    recordLifecycle("PiP prepared")
     pipPossibleObservation = controller.observe(\.isPictureInPicturePossible,
                                                  options: [.initial, .new]) { [weak self, weak controller] _, _ in
       DispatchQueue.main.async {
@@ -295,7 +373,7 @@ final class PlaybackService: NSObject {
   }
 
   private func attachAVPlayerPresentationIfAllowed() {
-    guard mediaKit == nil, let videoLayer = surface?.videoLayer else { return }
+    guard pendingReplacement == nil, mediaKit == nil, let videoLayer = surface?.videoLayer else { return }
     guard UIApplication.shared.applicationState == .active || avPlayerPiPAuthorized || pipActive else {
       videoLayer.player = nil
       avPlayerPresentationDetachedForBackground = true
@@ -307,7 +385,7 @@ final class PlaybackService: NSObject {
   }
 
   private func suspendAVPlayerPresentationForBackground(lifecycleTransition: Bool = false) {
-    guard (lifecycleTransition || UIApplication.shared.applicationState != .active), mediaKit == nil,
+    guard pendingReplacement == nil, (lifecycleTransition || UIApplication.shared.applicationState != .active), mediaKit == nil,
           !avPlayerPiPAuthorized, !pipActive else { return }
     // A prepared controller can let iOS begin an automatic PiP transition before
     // delegate rejection. Release it before detaching the layer so no PiP window exists.
@@ -333,9 +411,14 @@ final class PlaybackService: NSObject {
     // A controller which never became active may not produce didStop.
     DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
       guard let self = self, self.retiringPiP[key] != nil else { return }
-      controller.delegate = nil
-      self.retiringPiP.removeValue(forKey: key)
       self.retiringPiPAbortCompletions.removeValue(forKey: key)?.completion(false)
+      if controller.isPictureInPictureActive {
+        self.recordLifecycle("PiP retirement stop unconfirmed")
+        self.notice?("media_engine_cleanup_failed")
+      } else {
+        controller.delegate = nil
+        self.retiringPiP.removeValue(forKey: key)
+      }
       self.publish()
     }
     publish()
@@ -356,6 +439,7 @@ final class PlaybackService: NSObject {
     controller.stopPictureInPicture()
     return true
   }
+  private var playerObservations: [NSKeyValueObservation] = []
   private var observations: [NSKeyValueObservation] = []
   private var notifications: [NSObjectProtocol] = []
   private var remoteTargets: [(MPRemoteCommand, Any)] = []
@@ -395,6 +479,7 @@ final class PlaybackService: NSObject {
 
   private func enforcePlaybackEnvironment() {
     guard !playbackEnvironmentAllowsPlayback else { return }
+    pendingReplacement?.autoplay = false
     if wantsPlayback || enginePlaying || audioRecoveryPending || resumeAfterInterruption {
       pause()
     } else {
@@ -486,9 +571,7 @@ final class PlaybackService: NSObject {
     let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
     heartbeat = timer
     RunLoop.main.add(timer, forMode: .common)
-    observations.append(player.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
-      DispatchQueue.main.async { self?.publish() }
-    })
+    bindPlayerObservers()
     let center = NotificationCenter.default
     notifications.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] in self?.interruption($0) })
     notifications.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
@@ -520,7 +603,7 @@ final class PlaybackService: NSObject {
     })
     notifications.append(center.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: nil, queue: .main) { [weak self] note in
       guard let self = self, let item = note.object as? AVPlayerItem, item === self.player.currentItem else { return }
-      self.ended()
+      self.offerEndCandidate(source: "AVPlayerItemDidPlayToEndTime")
     })
     notifications.append(center.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: nil, queue: .main) { [weak self] note in
       guard let self = self, let item = note.object as? AVPlayerItem, item === self.player.currentItem else { return }
@@ -537,6 +620,7 @@ final class PlaybackService: NSObject {
     openingTimeout?.cancel(); cancelSeeks()
     audioRecoveryWorkItem?.cancel()
     mediaKitPiPRestoreTimeout?.cancel()
+    replacementTimeout?.cancel()
     cancelPendingAVPlayerPiP()
     mediaKitPiP?.stop()
     mediaKit?.stopPlayback()
@@ -551,7 +635,10 @@ final class PlaybackService: NSObject {
     return ["path": currentPath ?? "", "queue": queue, "index": index, "generation": generation,
       "revision": stateRevision, "wantsPlayback": wantsPlayback,
       "trackSelecting": trackSelection != nil, "engineId": mediaKit?.id ?? "",
-      "playing": wantsPlayback && playbackEnvironmentAllowsPlayback && enginePlaying, "loading": loading || isSeeking || (mediaKit?.buffering ?? (player.timeControlStatus == .waitingToPlayAtSpecifiedRate)),
+      "playing": wantsPlayback && playbackEnvironmentAllowsPlayback && enginePlaying,
+      // A terminal fault must not remain busy because the old engine retained
+      // a buffering flag. In particular, an unconfirmed PiP stop is an error.
+      "loading": !seekFault && (loading || isSeeking || (mediaKit?.buffering ?? (player.timeControlStatus == .waitingToPlayAtSpecifiedRate))),
       "seeking": isSeeking, "scrubbing": scrubbing, "isAudio": mediaIsAudio,
       "engine": mediaKit == nil ? "AVPlayer" : "media_kit", "engineNotice": engineNotice,
       "diagnostic": lastDiagnostic, "seekable": timelineReady && !seekFault && (mediaKit?.seekable ?? true),
@@ -609,6 +696,10 @@ final class PlaybackService: NSObject {
         result["engineLogs"] = errors
       }
     }
+    result["lifecycleEvents"] = lifecycleEvents
+    result["playerCreations"] = playerCreations
+    result["itemCreations"] = itemCreations
+    result["pipCreations"] = pipCreations
     let state = snapshot()
     result["audioTracks"] = state["audioTracks"] as? [[String: Any]] ?? []
     result["audioTrack"] = state["audioTrack"] ?? -1
@@ -626,28 +717,138 @@ final class PlaybackService: NSObject {
     load(resume: resume)
   }
 
+  /// A failed AVPlayer needs a new instance. Healthy replay never reaches here.
+  private func bindPlayerObservers() {
+    playerObservations.removeAll()
+    let observed = player
+    playerObservations.append(observed.observe(\.timeControlStatus, options: [.new]) { [weak self, weak observed] _, _ in
+      DispatchQueue.main.async {
+        guard let self, let observed, self.player === observed else { return }
+        self.publish()
+      }
+    })
+    playerObservations.append(observed.observe(\.status, options: [.new]) { [weak self, weak observed] _, _ in
+      DispatchQueue.main.async {
+        guard let self, let observed, self.player === observed,
+          observed.status == .failed, self.mediaKit == nil, self.currentPath != nil else { return }
+        self.lastDiagnostic = observed.error?.localizedDescription ?? "AVPlayer failed"
+        self.fail("media_playback_failed")
+      }
+    })
+  }
+
+  private func replaceFailedPlayerIfNeeded() {
+    guard player.status == .failed else { return }
+    // PiP has already acknowledged stopping before performLoad is entered.
+    clearBoundary()
+    observations.removeAll(); playerObservations.removeAll()
+    surface?.videoLayer.player = nil
+    player.pause(); player.replaceCurrentItem(with: nil)
+    player = AVPlayer()
+    playerCreations += 1
+    player.volume = mediaVolume
+    player.allowsExternalPlayback = false
+    player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+    bindPlayerObservers()
+    recordLifecycle("failed player replaced on explicit load")
+  }
+
   private func load(resume: Bool, autoplay: Bool = true) {
+    guard currentPath != nil else { return }
+    let controller = pendingReplacement?.controller
+      ?? (pipStartIssued || pip?.isPictureInPictureActive == true ? pip : nil)
+      ?? mediaKitPiP?.controller
+    guard let controller else {
+      guard retiringPiP.isEmpty else { fail("media_engine_cleanup_failed"); return }
+      performLoad(resume: resume, autoplay: autoplay)
+      return
+    }
+    awaitPresentationStop(controller, resume: resume, autoplay: autoplay)
+  }
+
+  private func awaitPresentationStop(_ controller: AVPictureInPictureController,
+                                    resume: Bool, autoplay: Bool, clearOnly: Bool = false) {
+    // Fence old callbacks immediately, but keep the player/item/layer alive
+    // until AVKit acknowledges stop. A timeout is failure, never safe teardown.
+    generation += 1
+    let token = generation
+    cancelAudioRecovery(); cancelIntroDetection(); cancelSeeks()
+    guard generation == token else { return }
+    wantsPlayback = false; timelineReady = false; loading = true; pauseEngine()
+    revokeManualPiP(enforce: false)
+    // The stop handshake now owns this controller. Do not let the older start
+    // watchdog retire it later; keep pipStartIssued until stop is acknowledged.
+    pipActivationTimeout?.cancel(); pipActivationTimeout = nil
+    let id = UUID()
+    pendingReplacement = (id, controller, resume, autoplay, clearOnly, false)
+    replacementTimeout?.cancel()
+    let timeout = DispatchWorkItem { [weak self, weak controller] in
+      guard let self, let controller, self.pendingReplacement?.id == id,
+        self.pendingReplacement?.controller === controller else { return }
+      self.pendingReplacement?.aborted = true
+      self.pendingReplacement?.autoplay = false
+      self.replacementTimeout = nil
+      self.recordLifecycle("PiP stop unconfirmed; replacement aborted")
+      self.fail("media_engine_cleanup_failed")
+    }
+    replacementTimeout = timeout
+    DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: timeout)
+    if let renderer = mediaKitPiP, renderer.controller === controller { renderer.stop() }
+    else { controller.stopPictureInPicture() }
+    publish()
+  }
+
+  private func finishPendingReplacement(_ controller: AVPictureInPictureController) -> Bool {
+    guard let request = pendingReplacement, request.controller === controller else { return false }
+    guard !controller.isPictureInPictureActive else { return true }
+    pendingReplacement = nil; replacementTimeout?.cancel(); replacementTimeout = nil
+    if let renderer = mediaKitPiP, renderer.controller === controller {
+      renderer.stop(); mediaKitPiP = nil; mediaKitPiPActiveRequestID = nil
+    }
+    cancelPendingAVPlayerPiP()
+    // A late didStop proves release is safe, but must not revive a load which
+    // already failed. A fresh explicit load can replace the aborted request.
+    if request.aborted { publish(); return true }
+    if request.clearOnly { clearPlaybackEnginesAfterMutation(); publish() }
+    else { performLoad(resume: request.resume, autoplay: request.autoplay) }
+    return true
+  }
+
+  private func clearPlaybackEnginesAfterMutation() {
+    discardMediaKitPiP()
+    mediaKit?.stopPlayback(); mediaKit = nil
+    discardAVPlayerPiP()
+    observations.removeAll()
+    player.replaceCurrentItem(with: nil)
+    loading = false
+  }
+
+  private func performLoad(resume: Bool, autoplay: Bool) {
     guard let path = currentPath else { return }
+    generation += 1
+    let token = generation
     revokeManualPiP(enforce: false)
     cancelAudioRecovery()
     assetPreparationTask?.cancel()
     assetPreparationTask = nil
     finishTrackSelection("track_selection_stale")
+    guard generation == token else { return }
     cancelIntroDetection()
     cancelSeeks()
+    guard generation == token else { return }
     openingTimeout?.cancel()
     clearBoundary()
     discardMediaKitPiP()
     mediaKit?.stopPlayback(); mediaKit = nil
     discardAVPlayerPiP()
+    replaceFailedPlayerIfNeeded()
+    recordLifecycle("load")
     engineNotice = ""; lastDiagnostic = ""; fallbackUsed = false; preparedMediaKit = false
     seekFault = false; pendingResume = resume && rememberProgress
-    initialPositionEstablished = false; initialHistoricalSeekPending = false; sessionCompleted = false
+    initialPositionEstablished = false; initialHistoricalSeekPending = false; sessionCompleted = false; atPlaybackEnd = false; pendingEndAction = false
     nonSeekableStartPosition = nil
     lastValidRememberedProgress = nil
     introSkipped = 0
-    generation += 1
-    let token = generation
     player.pause(); timelineReady = false; loading = true; wantsPlayback = autoplay && playbackEnvironmentAllowsPlayback; errorMessage = ""
     // An interruption belongs to the audio session, not to the media item. If the
     // user switches items while it is active, carry the new playback intent so an
@@ -656,7 +857,7 @@ final class PlaybackService: NSObject {
       resumeAfterInterruption = wantsPlayback
       audioRecoveryPending = wantsPlayback
     }
-    observations = Array(observations.prefix(1))
+    observations.removeAll()
     player.replaceCurrentItem(with: nil)
     aPoint = nil; bPoint = nil
     cues = []; subtitleName = ""; subtitleText = ""; surface?.caption.text = ""; surface?.caption.isHidden = true
@@ -685,7 +886,7 @@ final class PlaybackService: NSObject {
       timelineReady = false
       timelineOrigin = 0
       fallbackAudio = []; fallbackSubtitles = []
-      observations = Array(observations.prefix(1))
+      observations.removeAll()
       player.replaceCurrentItem(with: nil)
       surface?.videoLayer.isHidden = false
       surface?.onLayout = nil
@@ -729,6 +930,8 @@ final class PlaybackService: NSObject {
   private func install(_ asset: AVAsset, origin: Double, url: URL, path: String, resume: Bool, token: Int) {
     timelineOrigin = origin
     let item = AVPlayerItem(asset: asset)
+    itemCreations += 1
+    recordLifecycle("item created")
     item.audioTimePitchAlgorithm = .timeDomain
     var prepared = false
     observations.append(item.observe(\.status, options: [.new]) { [weak self] item, _ in
@@ -809,15 +1012,23 @@ final class PlaybackService: NSObject {
   private func finishStart(_ seconds: Double, token: Int, itemGeneration: Int) {
     guard introToken == token, generation == itemGeneration else { return }
     detectingIntro = false
+    let operation = playbackOperation
     enqueueSeek(seconds, precise: true) { [weak self] finished in
       DispatchQueue.main.async {
-        guard let self = self, self.introToken == token, self.generation == itemGeneration else { return }
+        guard let self = self, self.introToken == token, self.generation == itemGeneration,
+          self.playbackOperation == operation else { return }
+        let wasReplay = self.replayOperation == operation
+        self.replayOperation = nil
         self.loading = false
         if !finished { self.introSkipped = 0; self.endIntroBackgroundTask(); return }
+        if wasReplay && PlaybackEndGate.isAtEnd(self.position, duration: self.duration) {
+          self.endIntroBackgroundTask(); self.fail("seek_failed"); return
+        }
         self.initialPositionEstablished = true
         self.initialHistoricalSeekPending = false
-        self.sessionCompleted = false
-        if self.wantsPlayback { self.play() }
+        self.sessionCompleted = false; self.atPlaybackEnd = false; self.pendingEndAction = false
+        self.endGate.settled(operation: operation, rawTarget: seconds, position: self.position, duration: self.duration)
+        if self.wantsPlayback { self.attemptAudioRecovery() }
         self.endIntroBackgroundTask()
         self.persist(); self.publish()
       }
@@ -827,16 +1038,32 @@ final class PlaybackService: NSObject {
   func play() {
     guard currentPath != nil else { return }
     guard playbackEnvironmentAllowsPlayback else { enforcePlaybackEnvironment(); return }
-    if mediaKit?.ended == true { load(resume: false); return }
-    if seekFault || (mediaKit?.failure.isEmpty == false) { load(resume: true); return }
+    if let replacement = pendingReplacement {
+      if replacement.aborted { load(resume: true) }
+      else { pendingReplacement?.autoplay = true; wantsPlayback = true; publish() }
+      return
+    }
+    pendingEndAction = false
+    if seekFault || (mediaKit?.failure.isEmpty == false)
+      || (mediaKit == nil && (player.status == .failed || player.currentItem?.status == .failed)) {
+      load(resume: true); return
+    }
+    if replayOperation != nil { wantsPlayback = true; publish(); return }
+    if atPlaybackEnd {
+      wantsPlayback = true
+      attemptAudioRecovery(resetAttempts: true)
+      return
+    }
     if !timelineReady || loading || isSeeking || scrubbing { wantsPlayback = true; publish(); return }
     if let deadline = sleepUntil, Date() >= deadline { sleepTimer?.invalidate(); sleepTimer = nil; sleepUntil = nil; pause(); return }
-    if player.currentItem?.status == .failed { load(resume: true); return }
     wantsPlayback = true
     attemptAudioRecovery(resetAttempts: true)
   }
 
   private func attemptAudioRecovery(resetAttempts: Bool = false) {
+    if let deadline = sleepUntil, Date() >= deadline {
+      sleepTimer?.invalidate(); sleepTimer = nil; sleepUntil = nil; pause(); return
+    }
     guard playbackEnvironmentAllowsPlayback else { enforcePlaybackEnvironment(); return }
     guard currentPath != nil, wantsPlayback else { cancelAudioRecovery(); return }
     guard timelineReady, !loading, !isSeeking, !scrubbing else {
@@ -868,6 +1095,15 @@ final class PlaybackService: NSObject {
         return
       }
     }
+    let operationBeforeEnd = playbackOperation
+    let generationBeforeEnd = generation
+    resolveEndCandidate()
+    guard playbackOperation == operationBeforeEnd, generation == generationBeforeEnd, wantsPlayback else { return }
+    if pendingEndAction { performPendingEndAction(); return }
+    if atPlaybackEnd {
+      if let a = aPoint, bPoint != nil { seek(a) } else { restartCurrentItem() }
+      return
+    }
     if resetAttempts {
       audioRecoveryWorkItem?.cancel()
       audioRecoveryWorkItem = nil
@@ -880,7 +1116,6 @@ final class PlaybackService: NSObject {
       try activateAudioSession()
       audioRecoveryPending = false
       errorMessage = ""
-      if duration > 0 && position >= duration - 0.1 { load(resume: false); return }
       resumeEngine { [weak self] success in
         DispatchQueue.main.async {
           guard let self = self, self.generation == token, self.currentPath == path,
@@ -946,6 +1181,8 @@ final class PlaybackService: NSObject {
   }
 
   func pause() {
+    pendingReplacement?.autoplay = false
+    pendingEndAction = false
     let clearRecoveryFailure = audioRecoveryExhausted && errorMessage == "audio_recovery_failed"
     cancelAudioRecovery()
     let wasDetectingIntro = detectingIntro
@@ -957,25 +1194,34 @@ final class PlaybackService: NSObject {
     // Pausing the scan still needs a confirmed initial position. Do not cancel
     // an already dispatched initial seek's completion token merely to pause.
     if wasDetectingIntro { finishStart(0, token: introToken, itemGeneration: generation) }
+    resolveEndCandidate()
     persist(); publish()
   }
 
   func seek(_ seconds: Double, completion: @escaping (Bool) -> Void = { _ in }) {
-    guard timelineReady, !seekFault, seconds.isFinite, duration > 0, mediaKit?.seekable ?? true else { completion(false); return }
+    guard !cancellingSeeks, timelineReady, !seekFault, seconds.isFinite, duration > 0,
+      mediaKit?.seekable ?? true else { completion(false); return }
     captureRememberedProgress()
     initialHistoricalSeekPending = false
     cancelIntroDetection()
     introSkipped = 0
+    playbackOperation += 1
+    let operation = playbackOperation
+    let token = generation
+    endGate.beginOperation()
+    replayOperation = nil
     scrubbing = false
     pauseEngine()
     enqueueSeek(seconds, precise: true) { [weak self] finished in
-      guard let self = self else { completion(false); return }
+      guard let self = self, self.generation == token, self.playbackOperation == operation else { completion(false); return }
       if finished {
-        // A user seek can supersede initial positioning/intro detection.
         self.initialPositionEstablished = true
         self.initialHistoricalSeekPending = false
-        self.sessionCompleted = false
-        if self.wantsPlayback && !self.scrubbing { self.play() }
+        self.sessionCompleted = false; self.atPlaybackEnd = false; self.pendingEndAction = false
+        self.endGate.settled(operation: operation, rawTarget: seconds, position: self.position, duration: self.duration)
+        self.resolveEndCandidate()
+        guard self.generation == token, self.playbackOperation == operation else { completion(true); return }
+        if self.wantsPlayback && !self.scrubbing && !self.sessionCompleted { self.attemptAudioRecovery() }
         self.persist()
       }
       self.publish(); completion(finished)
@@ -983,8 +1229,12 @@ final class PlaybackService: NSObject {
   }
 
   func previewSeek(_ seconds: Double) {
-    guard timelineReady, !seekFault, seconds.isFinite, duration > 0, mediaKit?.seekable ?? true else { return }
-    if !scrubbing { captureRememberedProgress(); cancelIntroDetection(); scrubbing = true; pauseEngine() }
+    guard !cancellingSeeks, timelineReady, !seekFault, seconds.isFinite, duration > 0, mediaKit?.seekable ?? true else { return }
+    if !scrubbing {
+      captureRememberedProgress(); cancelIntroDetection()
+      playbackOperation += 1; replayOperation = nil; endGate.beginOperation()
+      scrubbing = true; pauseEngine()
+    }
     if mediaKit != nil { publish(); return }
     enqueueSeek(seconds, precise: false) { _ in }
   }
@@ -996,11 +1246,14 @@ final class PlaybackService: NSObject {
   }
 
   private func enqueueSeek(_ seconds: Double, precise: Bool, done: @escaping (Bool) -> Void) {
-    guard timelineReady, !seekFault else { done(false); return }
+    guard !cancellingSeeks, timelineReady, !seekFault else { done(false); return }
+    let token = generation
     seekSequence += 1
+    let requestID = seekSequence
     let previous = pendingSeek
-    pendingSeek = (seekSequence, min(max(0, duration - 0.001), max(0, seconds)), precise, done)
+    pendingSeek = (requestID, PlaybackEndGate.seekTarget(seconds, duration: duration), precise, done)
     previous?.done(false)
+    guard generation == token, pendingSeek?.id == requestID else { return }
     runNextSeek()
   }
 
@@ -1016,18 +1269,23 @@ final class PlaybackService: NSObject {
       self.activeSeek = nil; self.activeSeekCompletion = nil
       let superseded = self.pendingSeek != nil
       self.mediaKit?.recordDiagnostic(String(format: "seek finish session=%d request=%d success=%@ superseded=%@ after=%.3f elapsed=%.3f", token, request.id, finished ? "yes" : "no", superseded ? "yes" : "no", self.position, ProcessInfo.processInfo.systemUptime - startedAt))
+      let sequenceBeforeCallback = self.seekSequence
       request.done(finished && !superseded)
+      guard self.generation == token, self.seekSequence == sequenceBeforeCallback, self.activeSeek == nil else { return }
       if !finished && !superseded {
         self.fail("seek_failed")
         return
       }
-      self.runNextSeek(); self.publish()
+      self.runNextSeek()
+      guard self.generation == token else { return }
+      self.publish()
     }
     let timeout = DispatchWorkItem { [weak self] in
       guard let self = self, self.generation == token, self.activeSeek == request.id else { return }
       self.mediaKit?.recordDiagnostic("seek timeout session=\(token) request=\(request.id)")
       self.seekFault = true
       self.cancelSeeks()
+      guard self.generation == token else { return }
       self.fail("seek_timeout")
     }
     seekTimeout = timeout
@@ -1040,16 +1298,24 @@ final class PlaybackService: NSObject {
         DispatchQueue.main.async { finish(success) }
       }
     }
+    guard generation == token else { return }
     publish()
   }
 
   private func cancelSeeks() {
+    guard !cancellingSeeks else { return }
+    cancellingSeeks = true
+    defer { cancellingSeeks = false }
+    playbackOperation += 1
+    replayOperation = nil; endGate = PlaybackEndGate(); pendingEndAction = false
     if isSeeking { mediaKit?.recordDiagnostic("seek cancelled session=\(generation) active=\(activeSeek ?? -1) pending=\(pendingSeek?.id ?? -1)") }
     seekTimeout?.cancel(); seekTimeout = nil
     let active = activeSeekCompletion; let pending = pendingSeek
     activeSeek = nil; activeSeekCompletion = nil; pendingSeek = nil; scrubbing = false
     player.currentItem?.cancelPendingSeeks()
-    active?(false); pending?.done(false)
+    active?(false)
+    // Both captured completions are owed false even if the first opens another item.
+    pending?.done(false)
   }
 
   func skip(_ direction: Int) {
@@ -1064,17 +1330,68 @@ final class PlaybackService: NSObject {
       else if mode == "folder" || mode == "one" { next = (candidate + queue.count) % queue.count }
       else { if direction > 0 { pause() }; return }
     }
+    if next == index { wantsPlayback = playbackEnvironmentAllowsPlayback; restartCurrentItem(); return }
     index = next; load(resume: false)
   }
 
-  private func ended() {
-    guard wantsPlayback, playbackEnvironmentAllowsPlayback, initialPositionEstablished, !loading, !sessionCompleted else { return }
+  private func recordLifecycle(_ event: String) {
+    let identities = "player=\(ObjectIdentifier(player)) item=\(player.currentItem.map { String(describing: ObjectIdentifier($0)) } ?? "nil") pip=\(pip.map { String(describing: ObjectIdentifier($0)) } ?? "nil")"
+    lifecycleEvents.append("generation=\(generation) operation=\(playbackOperation) \(identities) \(event)")
+    if lifecycleEvents.count > 40 { lifecycleEvents.removeFirst(lifecycleEvents.count - 40) }
+  }
+
+  private var healthyForReplay: Bool {
+    guard timelineReady, !seekFault, duration > 0 else { return false }
+    if let engine = mediaKit { return engine.ready && engine.seekable && engine.failure.isEmpty }
+    return player.status == .readyToPlay && player.currentItem?.status == .readyToPlay
+  }
+
+  private func restartCurrentItem() {
+    guard replayOperation == nil, currentPath != nil else { return }
+    guard healthyForReplay else { fail("seek_failed"); return }
+    cancelAudioRecovery()
+    cancelIntroDetection()
+    playbackOperation += 1
+    endGate.beginOperation()
+    replayOperation = playbackOperation
+    scrubbing = false
+    pauseEngine()
+    initialHistoricalSeekPending = false
+    recordLifecycle("restart by seek")
+    // Keep the current player, item, layer, tracks and PiP. Manual seek(0) does
+    // not enter this path, so it continues to bypass smart-intro detection.
+    if mediaKit != nil { finishStart(0, token: introToken, itemGeneration: generation) }
+    else if let path = currentPath, let url = try? library.url(path) { prepareStart(url: url, saved: 0) }
+    else { replayOperation = nil; fail("media_missing") }
+  }
+
+  private func offerEndCandidate(source: String) {
+    guard currentPath != nil, timelineReady, !seekFault else { return }
+    endGate.offer()
+    recordLifecycle("EOF candidate source=\(source) busy=\(isSeeking || scrubbing)")
+    resolveEndCandidate()
+  }
+
+  private func resolveEndCandidate() {
+    guard initialPositionEstablished, !loading, !isSeeking, !scrubbing, replayOperation == nil,
+      endGate.consume(operation: playbackOperation, position: position, duration: duration) else { return }
+    recordLifecycle("EOF consumed")
+    // Consume before dispatching callbacks. An A–B repeat does not complete the
+    // entire media or overwrite its history with a completed zero.
+    atPlaybackEnd = true
+    if aPoint == nil || bPoint == nil { sessionCompleted = true; persist() }
+    pendingEndAction = wantsPlayback && playbackEnvironmentAllowsPlayback
+    performPendingEndAction()
+  }
+
+  private func performPendingEndAction() {
+    guard pendingEndAction, atPlaybackEnd, wantsPlayback, playbackEnvironmentAllowsPlayback,
+      !interrupted, !isSeeking, !scrubbing, !loading else { publish(); return }
+    pendingEndAction = false
     if let a = aPoint, bPoint != nil { seek(a); return }
-    sessionCompleted = true
-    persist()
     if !continuous { wantsPlayback = false; pauseEngine(); publish(); return }
-    if mode == "one" { load(resume: false); return }
-    if index == queue.count - 1 && mode == "sequence" { wantsPlayback = false; publish(); return }
+    if mode == "one" { restartCurrentItem(); return }
+    if index == queue.count - 1 && mode == "sequence" { wantsPlayback = false; pauseEngine(); publish(); return }
     skip(1)
   }
 
@@ -1351,7 +1668,7 @@ final class PlaybackService: NSObject {
 
   private func captureRememberedProgress() {
     guard rememberProgress, progressValid else { return }
-    let completed = sessionCompleted || position >= duration - 0.5
+    let completed = sessionCompleted
     lastValidRememberedProgress = ["position": completed ? 0.0 : position,
       "duration": duration, "timelineOrigin": timelineOrigin, "completed": completed]
   }
@@ -1367,13 +1684,17 @@ final class PlaybackService: NSObject {
   }
 
   private func fail(_ message: String) {
+    generation += 1
+    let token = generation
+    seekFault = true; timelineReady = false
     revokeManualPiP(enforce: false)
     cancelAudioRecovery()
     finishTrackSelection("track_selection_stale")
+    guard generation == token else { return }
     cancelIntroDetection()
     assetPreparationTask?.cancel(); assetPreparationTask = nil
-    openingTimeout?.cancel(); cancelSeeks(); generation += 1
-    seekFault = true; timelineReady = false
+    openingTimeout?.cancel(); cancelSeeks()
+    guard generation == token else { return }
     loading = false; wantsPlayback = false; pauseEngine(); errorMessage = message; publish()
   }
 
@@ -1633,20 +1954,34 @@ final class PlaybackService: NSObject {
   }
 
   func stopForMutation(_ path: String) {
-    if queue.contains(where: { $0 == path || $0.hasPrefix(path + "/") }) {
-      finishTrackSelection("track_selection_stale")
-      assetPreparationTask?.cancel(); assetPreparationTask = nil
-      pause(); cancelSeeks(); clearBoundary(); openingTimeout?.cancel(); generation += 1
-      discardMediaKitPiP()
-      mediaKit?.stopPlayback(); mediaKit = nil
-      player.replaceCurrentItem(with: nil)
-      timelineReady = false; timelineOrigin = 0
-      queue = []; index = 0; aPoint = nil; bPoint = nil; cues = []; loading = false
-      subtitleName = ""; subtitleText = ""; surface?.caption.text = ""; surface?.caption.isHidden = true
-      sleepTimer?.invalidate(); sleepTimer = nil; sleepUntil = nil; errorMessage = ""
-      discardAVPlayerPiP()
-      publish()
+    guard queue.contains(where: { $0 == path || $0.hasPrefix(path + "/") }) else { return }
+    pause()
+    generation += 1
+    let token = generation
+    finishTrackSelection("track_selection_stale")
+    guard generation == token else { return }
+    assetPreparationTask?.cancel(); assetPreparationTask = nil
+    cancelSeeks()
+    guard generation == token else { return }
+    clearBoundary(); openingTimeout?.cancel()
+    timelineReady = false; timelineOrigin = 0
+    queue = []; index = 0; aPoint = nil; bPoint = nil; cues = []; loading = false
+    sessionCompleted = false; atPlaybackEnd = false; pendingEndAction = false
+    subtitleName = ""; subtitleText = ""; surface?.caption.text = ""; surface?.caption.isHidden = true
+    sleepTimer?.invalidate(); sleepTimer = nil; sleepUntil = nil; errorMessage = ""
+    let controller = pendingReplacement?.controller
+      ?? (pipStartIssued || pip?.isPictureInPictureActive == true ? pip : nil)
+      ?? mediaKitPiP?.controller
+    if let controller {
+      awaitPresentationStop(controller, resume: false, autoplay: false, clearOnly: true)
+    } else if retiringPiP.isEmpty {
+      clearPlaybackEnginesAfterMutation()
+    } else {
+      // Existing retiring presentation still owns its output until stop is
+      // acknowledged. Never tear that output down on a timeout assumption.
+      notice?("media_engine_cleanup_failed")
     }
+    publish()
   }
 
   func remapQueuePath(from old: String, to new: String) {
@@ -1687,6 +2022,12 @@ final class PlaybackService: NSObject {
     // Only container/decoder failures justify trying a different engine.
     let mediaFailure = detail.domain == AVFoundationErrorDomain && [-11800, -11821, -11828, -11829, -11833].contains(detail.code)
     guard !fallbackUsed, mediaFailure else { fail("media_playback_failed"); return }
+    guard !pipStartIssued, !pipActive, mediaKitPiP == nil, retiringPiP.isEmpty,
+      pendingReplacement == nil else {
+      // Do not replace an engine underneath a PiP stop/start handshake. The
+      // explicit retry path stops presentation before rebuilding playback.
+      fail("media_playback_failed"); return
+    }
     fallbackUsed = true
     engineNotice = "fallback_engine_active"
     openMediaKit(url: url, resume: resume, token: token)
@@ -1708,10 +2049,11 @@ final class PlaybackService: NSObject {
       }
     }
     cancelSeeks()
+    guard generation == token else { return }
     player.pause(); player.replaceCurrentItem(with: nil)
-    observations = Array(observations.prefix(1))
+    observations.removeAll()
     timelineReady = false; timelineOrigin = 0; preparedMediaKit = false
-    initialPositionEstablished = false; initialHistoricalSeekPending = false; sessionCompleted = false
+    initialPositionEstablished = false; initialHistoricalSeekPending = false; sessionCompleted = false; atPlaybackEnd = false; pendingEndAction = false
     nonSeekableStartPosition = nil
     loading = true
     guard let transport = mediaKitTransport else { fail("playback_channel_unavailable"); return }
@@ -1774,7 +2116,7 @@ final class PlaybackService: NSObject {
       initialPositionEstablished = true
       persist()
     }
-    if engine.ended && !isSeeking && !scrubbing { ended(); return }
+    if engine.ended { offerEndCandidate(source: "media_kit snapshot"); return }
     captureRememberedProgress()
   }
 
@@ -1872,6 +2214,7 @@ final class PlaybackService: NSObject {
 
   func finishAVPlayerPiP(_ controller: AVPictureInPictureController) {
     guard pip === controller else { return }
+    if finishPendingReplacement(controller) { return }
     avPlayerPiPAuthorized = false
     revokeManualPiP()
     cancelPendingAVPlayerPiP()
@@ -2008,6 +2351,7 @@ final class PlaybackService: NSObject {
   }
 
   func finishMediaKitPiP(_ controller: AVPictureInPictureController) {
+    if finishPendingReplacement(controller) { return }
     guard let renderer = mediaKitPiP, renderer.controller === controller else { return }
     revokeManualPiP()
     renderer.stop()
@@ -2059,6 +2403,10 @@ final class PlaybackService: NSObject {
     mediaKitPiP = nil
     publish()
     if !waitForDidStop { completion(true) }
+  }
+
+  func allowsPiPRestore(_ controller: AVPictureInPictureController) -> Bool {
+    pendingReplacement == nil && (pip === controller || mediaKitPiP?.controller === controller)
   }
 
   func ownsMediaKitPiP(_ controller: AVPictureInPictureController) -> Bool {

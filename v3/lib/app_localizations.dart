@@ -398,10 +398,10 @@ class AppLocalizations {
       'en': 'Automatic audio recovery failed. Tap play to try again manually.',
     },
     'media_engine_cleanup_failed': {
-      'zh-Hans': '旧播放引擎未能安全释放，已拒绝打开新媒体',
-      'zh-Hant': '舊播放引擎未能安全釋放，已拒絕開啟新媒體',
-      'ja': '以前の再生エンジンを安全に解放できないため、新しいメディアを開きませんでした',
-      'en': 'The previous playback engine could not be released safely, so the new media was not opened.',
+      'zh-Hans': '旧播放引擎或画中画尚未确认停止，已暂停播放。请完全关闭并重新打开 App 后再试。',
+      'zh-Hant': '舊播放引擎或子母畫面尚未確認停止，已暫停播放。請完全關閉並重新開啟 App 後再試。',
+      'ja': '以前の再生エンジンまたはピクチャインピクチャの停止を確認できません。再生を一時停止しました。アプリを完全に終了してから開き直してください。',
+      'en': 'Stopping the previous playback engine or Picture in Picture could not be confirmed. Playback is paused. Fully close and reopen the app before trying again.',
     },
     'pip_restore_stale': {
       'zh-Hans': '画中画恢复请求已过期',

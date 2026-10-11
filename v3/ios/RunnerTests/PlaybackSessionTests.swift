@@ -5,6 +5,8 @@ import UIKit
 
 private final class PlaybackTestTransport {
   var requestedSeeks: [Double] = []
+  var versions: [String: Int] = [:]
+  var snapshotSequence = 0
   var commands: [String] = []
   var holdSeeks = false
   var holdSubtitles = false
@@ -13,6 +15,7 @@ private final class PlaybackTestTransport {
 
   func send(_ method: String, _ arguments: [String: Any], _ finish: @escaping (Bool) -> Void) {
     commands.append(method)
+    if let id = arguments["engineId"] as? String, let version = arguments["positionVersion"] as? Int { versions[id] = version }
     if method == "seek" { requestedSeeks.append(arguments["seconds"] as? Double ?? -1) }
     if method == "seek", holdSeeks {
       seeks.append((arguments["seconds"] as? Double ?? -1, finish))
@@ -22,6 +25,15 @@ private final class PlaybackTestTransport {
       finish(true)
     }
   }
+  func publish(to service: PlaybackService, _ state: [String: Any]) {
+    var values = state
+    snapshotSequence += 1
+    let id = state["engineId"] as? String ?? ""
+    values["positionVersion"] = versions[id] ?? 0
+    values["snapshotSequence"] = snapshotSequence
+    service.receiveMediaKitState(values)
+  }
+
 }
 
 final class PlaybackSessionTests: XCTestCase {
@@ -155,7 +167,7 @@ final class PlaybackSessionTests: XCTestCase {
     waitUntil { service.mediaKitEngineId != nil }
     service.pause()
     let previousSeeks = testTransport.requestedSeeks.count
-    service.receiveMediaKitState([
+    testTransport.publish(to: service, [
       "engineId": service.mediaKitEngineId!, "ready": true,
       "duration": 120.0, "position": 0.0, "seekable": true, "playing": false,
     ])
@@ -208,7 +220,7 @@ final class PlaybackSessionTests: XCTestCase {
   }
 
   private func position(_ value: Double, in service: PlaybackService, ended: Bool = false) {
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!,
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!,
       "position": value, "ended": ended])
   }
 
@@ -360,7 +372,7 @@ final class PlaybackSessionTests: XCTestCase {
     let service = try makeService(transport, resume: true, prepare: false,
       record: ["position": 60.0, "duration": 120.0, "timelineOrigin": 0.0])
     service.pause()
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "ready": true,
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "ready": true,
       "duration": 120.0, "position": 0.0, "seekable": true, "playing": false])
     // No main run-loop turn between readiness/read enqueue and explicit seek.
     position(18, in: service)
@@ -376,7 +388,7 @@ final class PlaybackSessionTests: XCTestCase {
     let service = try makeService(transport, resume: true, prepare: false,
       record: ["position": 60.0, "duration": 100.0, "timelineOrigin": 5.0, "completed": false])
     service.pause()
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "ready": true,
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "ready": true,
       "duration": 120.0, "position": 0.0, "seekable": false, "playing": false])
     waitUntil { service.snapshot()["engineNotice"] as? String == "media_not_seekable" }
     service.persist()
@@ -384,7 +396,7 @@ final class PlaybackSessionTests: XCTestCase {
     configure(service, remember: true)
     assertProgress(record(), position: 60, duration: 100, origin: 5)
     XCTAssertEqual(service.snapshot()["progressValid"] as? Bool, false)
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "failure": "media_kit_open_failed"])
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "failure": "media_kit_open_failed"])
     service.persist()
     assertProgress(record(), position: 60, duration: 100, origin: 5)
   }
@@ -394,16 +406,16 @@ final class PlaybackSessionTests: XCTestCase {
     let service = try makeService(transport, resume: true, prepare: false,
       record: ["position": 60.0, "duration": 120.0, "timelineOrigin": 0.0, "completed": false])
     service.pause()
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "ready": true,
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "ready": true,
       "duration": 120.0, "position": 0.0, "seekable": false, "playing": false])
     waitUntil { service.snapshot()["engineNotice"] as? String == "media_not_seekable" }
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "position": 0.0, "playing": true])
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "position": 0.0, "playing": true])
     service.persist()
     assertProgress(record(), position: 60)
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "position": 1.0, "buffering": true])
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "position": 1.0, "buffering": true])
     service.persist()
     assertProgress(record(), position: 60)
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "position": 2.0, "buffering": false])
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "position": 2.0, "buffering": false])
     assertProgress(record(), position: 2)
     XCTAssertEqual(service.snapshot()["progressValid"] as? Bool, true)
     XCTAssertTrue(transport.requestedSeeks.isEmpty)
@@ -414,14 +426,14 @@ final class PlaybackSessionTests: XCTestCase {
     let service = try makeService(transport, resume: true, prepare: false,
       record: ["position": 60.0, "duration": 120.0, "timelineOrigin": 0.0, "completed": false])
     service.pause()
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "ready": true,
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "ready": true,
       "duration": 120.0, "position": 0.0, "seekable": NSNull(), "playing": false])
     _ = record()
     XCTAssertTrue(transport.requestedSeeks.isEmpty)
     XCTAssertEqual(service.snapshot()["progressValid"] as? Bool, false)
     assertProgress(record(), position: 60)
     transport.holdSeeks = true
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "seekable": true])
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "seekable": true])
     waitUntil { !transport.seeks.isEmpty }
     XCTAssertEqual(try XCTUnwrap(transport.seeks.first).seconds, 60)
     position(60, in: service)
@@ -435,11 +447,11 @@ final class PlaybackSessionTests: XCTestCase {
     let service = try makeService(transport, resume: true, prepare: false,
       record: ["position": 60.0, "duration": 120.0, "timelineOrigin": 0.0, "completed": false])
     service.pause()
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "ready": true,
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "ready": true,
       "duration": 120.0, "position": 0.0, "seekable": false, "playing": false])
     waitUntil { service.snapshot()["engineNotice"] as? String == "media_not_seekable" }
     transport.holdSeeks = true
-    service.receiveMediaKitState(["engineId": service.mediaKitEngineId!, "seekable": true])
+    testTransport.publish(to: service, ["engineId": service.mediaKitEngineId!, "seekable": true])
     waitUntil { !transport.seeks.isEmpty }
     XCTAssertEqual(try XCTUnwrap(transport.seeks.first).seconds, 60)
     assertProgress(record(), position: 60)

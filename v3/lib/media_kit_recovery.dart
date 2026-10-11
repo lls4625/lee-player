@@ -161,3 +161,69 @@ class MediaKitRepairBudget {
 
   void invalidate() => _valid = false;
 }
+
+/// Identifies when a state read began, before any asynchronous plugin reads.
+class MediaKitSnapshotStamp {
+  const MediaKitSnapshotStamp._(
+    this._session,
+    this.positionVersion,
+    this.snapshotSequence,
+  );
+
+  final int _session;
+  final int positionVersion;
+  final int snapshotSequence;
+}
+
+/// Fences the whole state payload, including EOF and failure, across seeks.
+///
+/// Sequence numbers are allocated at capture time, so a slower property read
+/// cannot overwrite a newer published snapshot from the same position version.
+/// Session changes also invalidate work even if the position version is reused.
+class MediaKitSnapshotFence {
+  int _session = 0;
+  int _positionVersion = 0;
+  int _snapshotSequence = 0;
+  int _lastPublishedSequence = 0;
+
+  int get positionVersion => _positionVersion;
+
+  void beginSession(int positionVersion) {
+    if (positionVersion < 0) throw ArgumentError.value(positionVersion);
+    _session++;
+    _positionVersion = positionVersion;
+  }
+
+  void invalidateSession() => _session++;
+
+  /// Called synchronously when a seek arrives, before it waits in the queue.
+  bool recordPositionVersion(int positionVersion) {
+    if (positionVersion < _positionVersion) return false;
+    _positionVersion = positionVersion;
+    return true;
+  }
+
+  MediaKitSnapshotStamp capture() => MediaKitSnapshotStamp._(
+    _session,
+    _positionVersion,
+    ++_snapshotSequence,
+  );
+
+  bool isCurrent(MediaKitSnapshotStamp stamp) =>
+      stamp._session == _session && stamp.positionVersion == _positionVersion;
+
+  /// A current error is a new state transition, rather than a delayed property
+  /// snapshot. Give it a fresh sequence even if newer reads already published.
+  /// An old session/position error must not poison the current failure state.
+  MediaKitSnapshotStamp? captureFailure(MediaKitSnapshotStamp origin) =>
+      isCurrent(origin) ? capture() : null;
+
+  bool accept(MediaKitSnapshotStamp stamp) {
+    if (!isCurrent(stamp) ||
+        stamp.snapshotSequence <= _lastPublishedSequence) {
+      return false;
+    }
+    _lastPublishedSequence = stamp.snapshotSequence;
+    return true;
+  }
+}
