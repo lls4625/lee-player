@@ -3,6 +3,21 @@ import UIKit
 import UniformTypeIdentifiers
 import AVKit
 
+enum AppearancePreference {
+  static func mode(in defaults: UserDefaults = .standard) -> String {
+    // A fallback must not persist over an existing or later user selection.
+    defaults.string(forKey: "appearance.mode") ?? "dark"
+  }
+
+  static func interfaceStyle(in defaults: UserDefaults = .standard) -> UIUserInterfaceStyle {
+    switch mode(in: defaults) {
+    case "dark": return .dark
+    case "light": return .light
+    default: return .unspecified
+    }
+  }
+}
+
 final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate, AVPictureInPictureControllerDelegate {
   static func matchesPiPRestoreToken(expected: UUID?, received: String?) -> Bool {
     guard let expected = expected, let received = received else { return false }
@@ -391,7 +406,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     do {
       switch call.method {
       case "appearance":
-        result(UserDefaults.standard.string(forKey: "appearance.mode") ?? "system"); return
+        result(AppearancePreference.mode()); return
       case "language":
         result(UserDefaults.standard.string(forKey: "language.mode") ?? "system"); return
       case "setLanguage":
@@ -447,8 +462,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         _ = try library.url(importParent, allowRoot: true)
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: args["folder"] as? Bool == true ? [.folder] : [.item], asCopy: false)
         picker.allowsMultipleSelection = args["folder"] as? Bool != true
-        let appearance = UserDefaults.standard.string(forKey: "appearance.mode") ?? "system"
-        picker.overrideUserInterfaceStyle = appearance == "dark" ? .dark : appearance == "light" ? .light : .unspecified
+        picker.overrideUserInterfaceStyle = AppearancePreference.interfaceStyle()
         picker.delegate = self
         picker.presentationController?.delegate = self
         importResult = result

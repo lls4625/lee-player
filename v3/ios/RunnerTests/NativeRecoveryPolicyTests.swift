@@ -754,3 +754,49 @@ final class ExtraBoundaryTests: XCTestCase {
     XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: library.support.path).contains(where: {$0.hasPrefix("Import-")}))
   }
 }
+
+final class AppearancePreferenceTests: XCTestCase {
+  private var suiteName: String!
+  private var defaults: UserDefaults!
+
+  override func setUpWithError() throws {
+    suiteName = "LeiPlayerAppearanceTests-\(UUID().uuidString)"
+    defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+  }
+
+  override func tearDownWithError() throws {
+    defaults.removePersistentDomain(forName: suiteName)
+    defaults = nil
+  }
+
+  func testFirstInstallUsesDarkForBridgeAndFilePickerWithoutPersisting() {
+    XCTAssertNil(defaults.object(forKey: "appearance.mode"))
+    XCTAssertEqual(AppearancePreference.mode(in: defaults), "dark")
+    XCTAssertEqual(AppearancePreference.interfaceStyle(in: defaults), .dark)
+    XCTAssertNil(defaults.object(forKey: "appearance.mode"))
+  }
+
+  func testSavedModesArePreservedAndFilePickerUsesTheSamePreference() {
+    for mode in ["system", "light", "dark"] {
+      defaults.set(mode, forKey: "appearance.mode")
+      XCTAssertEqual(AppearancePreference.mode(in: defaults), mode)
+      let style = AppearancePreference.interfaceStyle(in: defaults)
+      switch mode {
+      case "dark": XCTAssertEqual(style, .dark)
+      case "light": XCTAssertEqual(style, .light)
+      default: XCTAssertEqual(style, .unspecified)
+      }
+      XCTAssertEqual(defaults.string(forKey: "appearance.mode"), mode)
+    }
+  }
+
+  func testDefaultReadDoesNotMaskASubsequentChoiceOrRestart() throws {
+    XCTAssertEqual(AppearancePreference.mode(in: defaults), "dark")
+    for mode in ["light", "system", "dark"] {
+      defaults.set(mode, forKey: "appearance.mode")
+      let reopened = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+      XCTAssertEqual(AppearancePreference.mode(in: reopened), mode)
+      XCTAssertEqual(reopened.string(forKey: "appearance.mode"), mode)
+    }
+  }
+}

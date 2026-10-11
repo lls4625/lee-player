@@ -69,7 +69,9 @@ class PlayerModel extends ChangeNotifier {
   Map<String, dynamic>? importProgress;
   bool initializing = false, scanning = false, importing = false;
   int libraryRevision = 0;
-  String appearance = 'system';
+  // Match the native first-install default while saved preferences load.
+  // Loading still restores an explicit system/light/dark choice without writes.
+  String appearance = 'dark';
   AppLanguageMode languageMode = AppLanguageMode.system;
   String libraryLayout = 'list', librarySort = 'name';
   bool librarySortAscending = true;
