@@ -800,3 +800,39 @@ final class AppearancePreferenceTests: XCTestCase {
     }
   }
 }
+
+/// Pure production-policy coverage. Service callback order is also exercised by
+/// tool/run_presentation_review.py; real PiP still requires an iOS device run.
+final class AVPlayerPresentationPolicyTests: XCTestCase {
+  func testForegroundRepairRequiresValidIdleCurrentPresentation() {
+    for bits in 0..<128 {
+      func bit(_ index: Int) -> Bool { bits & (1 << index) != 0 }
+      XCTAssertEqual(AVPlayerPresentationPolicy.permitsForegroundRepair(
+        active: bit(0), validItem: bit(1), hasSurface: bit(2), replacing: bit(3),
+        starting: bit(4), pipActive: bit(5), retiring: bit(6)), bits == 7)
+    }
+  }
+
+  func testExplicitBackgroundCleanupNeverConfusesInactiveWithBackground() {
+    for bits in 0..<64 {
+      func bit(_ index: Int) -> Bool { bits & (1 << index) != 0 }
+      XCTAssertEqual(AVPlayerPresentationPolicy.permitsBackgroundDetach(
+        background: bit(0), replacing: bit(1), authorized: bit(2), starting: bit(3),
+        pipActive: bit(4), retiring: bit(5)), bits == 1)
+    }
+  }
+
+  func testAttachmentKeepsAuthorizedAndActivePiPHandoff() {
+    for bits in 0..<8 {
+      XCTAssertEqual(AVPlayerPresentationPolicy.permitsAttachment(active: bits & 1 != 0,
+        authorized: bits & 2 != 0, pipActive: bits & 4 != 0), bits != 0)
+    }
+  }
+
+  func testIssuedOrObservedStartRequiresTerminalEvenWhileInactive() {
+    for bits in 0..<8 {
+      XCTAssertEqual(AVPlayerPresentationPolicy.requiresTerminal(startIssued: bits & 1 != 0,
+        startObserved: bits & 2 != 0, active: bits & 4 != 0), bits != 0)
+    }
+  }
+}

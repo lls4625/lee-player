@@ -20,6 +20,8 @@ API_AVAILABLE(ios(15.0))
 @property (nonatomic, copy, nullable) BOOL (^playingProvider)(void);
 @property (nonatomic, copy, nullable) double (^rateProvider)(void);
 @property (nonatomic, readonly, getter=isActive) BOOL active;
+/// Set before calling AVKit start; inactive alone does not prove safe retirement.
+@property (nonatomic, readonly) BOOL startIssued;
 @property (nonatomic, readonly) AVPictureInPictureController *controller;
 
 - (nullable instancetype)initWithPlayerHandle:(int64_t)handle

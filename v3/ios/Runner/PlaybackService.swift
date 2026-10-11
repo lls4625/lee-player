@@ -24,6 +24,29 @@ struct BackgroundPlaybackPolicy {
   }
 }
 
+/// Keep ordinary foreground repair separate from the first-load attachment.
+/// These rules do not change playback intent or rebuild an AVPlayer/item.
+struct AVPlayerPresentationPolicy {
+  static func permitsAttachment(active: Bool, authorized: Bool, pipActive: Bool) -> Bool {
+    active || authorized || pipActive
+  }
+
+  static func permitsForegroundRepair(active: Bool, validItem: Bool, hasSurface: Bool,
+                                      replacing: Bool, starting: Bool, pipActive: Bool,
+                                      retiring: Bool) -> Bool {
+    active && validItem && hasSurface && !replacing && !starting && !pipActive && !retiring
+  }
+
+  static func permitsBackgroundDetach(background: Bool, replacing: Bool, authorized: Bool,
+                                      starting: Bool, pipActive: Bool, retiring: Bool) -> Bool {
+    background && !replacing && !authorized && !starting && !pipActive && !retiring
+  }
+
+  static func requiresTerminal(startIssued: Bool, startObserved: Bool, active: Bool) -> Bool {
+    startIssued || startObserved || active
+  }
+}
+
 /// EOF notifications have item identity, but no trustworthy playback-pass ID.
 /// Treat them as hints; only the current, settled timeline can consume one.
 struct PlaybackEndGate {
@@ -314,7 +337,7 @@ final class PlaybackService: NSObject {
   private var pipStartIssued = false
   // Business invariant: background playback is audio-only. PiP requires an explicit button request.
   private var avPlayerPiPAuthorized = false
-  private var avPlayerPresentationDetachedForBackground = false
+  private var installedAVPlayerItem: (item: AVPlayerItem, path: String, generation: Int)?
   private var mediaKitPiP: MediaKitPiPRenderer?
   private var mediaKitPiPPreparing = false
   private var mediaKitPiPRequestID: String?
@@ -322,33 +345,46 @@ final class PlaybackService: NSObject {
   private var mediaKitPiPPreparationTimeout: DispatchWorkItem?
   private var mediaKitPiPRestoring = false
   private var mediaKitPiPRestoreTimeout: DispatchWorkItem?
-  private var retiringPiP: [ObjectIdentifier: (AVPictureInPictureController, MediaKitPiPRenderer?)] = [:]
+  private var retiringPiP: [ObjectIdentifier: (controller: AVPictureInPictureController,
+    renderer: MediaKitPiPRenderer?, requiresTerminal: Bool)] = [:]
+  private var observedPiPStarts: Set<ObjectIdentifier> = []
   private var retiringPiPAbortCompletions:
     [ObjectIdentifier: (token: UUID, completion: (Bool) -> Void)] = [:]
 
+  private var hasValidAVPlayerPresentationItem: Bool {
+    guard let installed = installedAVPlayerItem, let path = currentPath else { return false }
+    return installed.generation == generation && installed.path == path
+      && installed.item === player.currentItem && installed.item.status != .failed
+      && player.status != .failed && !seekFault && errorMessage.isEmpty && mediaKit == nil
+  }
+
   private func discardAVPlayerPiP() {
-    // Capture this before cancellation clears pipStartIssued. A start request
-    // can still be in flight even when isPictureInPictureActive is false.
+    // Inactive does not prove an issued/observed start has finished.
     let controller = pip
-    let needsRetirement = pipStartIssued || controller?.isPictureInPictureActive == true
+    let needsRetirement = AVPlayerPresentationPolicy.requiresTerminal(
+      startIssued: pipStartIssued,
+      startObserved: controller.map { observedPiPStarts.contains(ObjectIdentifier($0)) } == true,
+      active: controller?.isPictureInPictureActive == true)
     avPlayerPiPAuthorized = false
     pipPossibleObservation?.invalidate()
     pipPossibleObservation = nil
     cancelPendingAVPlayerPiP()
+    // Clear ownership before stop: AVKit may synchronously deliver a terminal callback.
+    pip = nil
     if let controller = controller {
       if needsRetirement {
         retirePiP(controller)
       } else {
-        // Prepared or already stopped controllers will not send another didStop.
-        // Releasing them must not block the next media's PiP for the fallback wait.
+        observedPiPStarts.remove(ObjectIdentifier(controller))
         controller.delegate = nil
       }
     }
-    pip = nil
   }
 
   private func prepareAVPlayerPiP() {
     guard UIApplication.shared.applicationState == .active, mediaKit == nil,
+          pendingReplacement == nil, !pipStartIssued, !pipActive, retiringPiP.isEmpty,
+          hasValidAVPlayerPresentationItem,
           AVPictureInPictureController.isPictureInPictureSupported(),
           let videoLayer = surface?.videoLayer, videoLayer.player === player else { return }
     if let controller = pip, controller.playerLayer === videoLayer {
@@ -357,7 +393,8 @@ final class PlaybackService: NSObject {
       return
     }
     discardAVPlayerPiP()
-    guard let controller = AVPictureInPictureController(playerLayer: videoLayer) else { return }
+    guard retiringPiP.isEmpty,
+          let controller = AVPictureInPictureController(playerLayer: videoLayer) else { return }
     controller.delegate = pipDelegate
     controller.canStartPictureInPictureAutomaticallyFromInline = false
     pip = controller
@@ -372,54 +409,75 @@ final class PlaybackService: NSObject {
     }
   }
 
-  private func attachAVPlayerPresentationIfAllowed() {
-    guard pendingReplacement == nil, mediaKit == nil, let videoLayer = surface?.videoLayer else { return }
-    guard UIApplication.shared.applicationState == .active || avPlayerPiPAuthorized || pipActive else {
-      videoLayer.player = nil
-      avPlayerPresentationDetachedForBackground = true
+  private func attachAVPlayerPresentationIfAllowed(reason: String) {
+    guard pendingReplacement == nil, mediaKit == nil, retiringPiP.isEmpty,
+          let videoLayer = surface?.videoLayer else { return }
+    guard AVPlayerPresentationPolicy.permitsAttachment(
+      active: UIApplication.shared.applicationState == .active,
+      authorized: avPlayerPiPAuthorized, pipActive: pipActive) else {
+      // A rejected attachment must never tear down somebody else's handoff.
+      recordLifecycle("attach deferred: \(reason)")
       return
     }
-    videoLayer.player = player
-    avPlayerPresentationDetachedForBackground = false
+    if videoLayer.player !== player {
+      videoLayer.player = player
+      recordLifecycle("layer bound: \(reason)")
+    }
     prepareAVPlayerPiP()
   }
 
-  private func suspendAVPlayerPresentationForBackground(lifecycleTransition: Bool = false) {
-    guard pendingReplacement == nil, (lifecycleTransition || UIApplication.shared.applicationState != .active), mediaKit == nil,
-          !avPlayerPiPAuthorized, !pipActive else { return }
-    // A prepared controller can let iOS begin an automatic PiP transition before
-    // delegate rejection. Release it before detaching the layer so no PiP window exists.
-    discardAVPlayerPiP()
-    if let videoLayer = surface?.videoLayer, videoLayer.player === player {
-      videoLayer.player = nil
-    }
-    avPlayerPresentationDetachedForBackground = true
+  private func ensureAVPlayerPresentation(reason: String) {
+    guard AVPlayerPresentationPolicy.permitsForegroundRepair(
+      active: UIApplication.shared.applicationState == .active,
+      validItem: hasValidAVPlayerPresentationItem, hasSurface: surface != nil,
+      replacing: pendingReplacement != nil, starting: pipStartIssued,
+      pipActive: pipActive, retiring: !retiringPiP.isEmpty) else { return }
+    attachAVPlayerPresentationIfAllowed(reason: reason)
   }
 
-  private func restoreAVPlayerPresentationAfterBackground() {
-    guard avPlayerPresentationDetachedForBackground else { return }
-    avPlayerPresentationDetachedForBackground = false
-    guard mediaKit == nil else { return }
-    attachAVPlayerPresentationIfAllowed()
+  private func suspendAVPlayerPresentationForBackground() {
+    guard mediaKit == nil, AVPlayerPresentationPolicy.permitsBackgroundDetach(
+      background: UIApplication.shared.applicationState == .background,
+      replacing: pendingReplacement != nil, authorized: avPlayerPiPAuthorized,
+      starting: pipStartIssued, pipActive: pipActive, retiring: !retiringPiP.isEmpty) else { return }
+    discardAVPlayerPiP()
+    // An observed start can put the controller into retirement during discard.
+    guard retiringPiP.isEmpty else { return }
+    if let videoLayer = surface?.videoLayer, videoLayer.player === player {
+      videoLayer.player = nil
+      recordLifecycle("layer detached: confirmed background")
+    }
+  }
+
+  private func reconcileAVPlayerPresentation(reason: String) {
+    suspendAVPlayerPresentationForBackground()
+    ensureAVPlayerPresentation(reason: reason)
   }
 
   private func retirePiP(_ controller: AVPictureInPictureController, renderer: MediaKitPiPRenderer? = nil) {
     let key = ObjectIdentifier(controller)
     guard retiringPiP[key] == nil else { return }
-    retiringPiP[key] = (controller, renderer)
+    // AVPlayer callers retire only after an issued or observed start. A native
+    // media_kit renderer may still be prepared without ever issuing AVKit start.
+    let requiresTerminal = AVPlayerPresentationPolicy.requiresTerminal(
+      startIssued: renderer?.startIssued ?? true,
+      startObserved: observedPiPStarts.contains(key), active: controller.isPictureInPictureActive)
+    retiringPiP[key] = (controller, renderer, requiresTerminal)
+    recordLifecycle("PiP retiring controller=\(key) terminalRequired=\(requiresTerminal)")
     if let renderer = renderer { renderer.stop() } else { controller.stopPictureInPicture() }
-    // A controller which never became active may not produce didStop.
+    // Never infer completion from isActive=false after start. The identity and
+    // delegate stay alive until didStop/failedToStart rejects any late start.
+    if let entry = retiringPiP[key], !entry.requiresTerminal,
+       !controller.isPictureInPictureActive {
+      _ = finishRetiringPiP(controller)
+      return
+    }
     DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
       guard let self = self, self.retiringPiP[key] != nil else { return }
       self.retiringPiPAbortCompletions.removeValue(forKey: key)?.completion(false)
-      if controller.isPictureInPictureActive {
-        self.recordLifecycle("PiP retirement stop unconfirmed")
-        self.notice?("media_engine_cleanup_failed")
-      } else {
-        controller.delegate = nil
-        self.retiringPiP.removeValue(forKey: key)
-      }
-      self.publish()
+      guard self.retiringPiP[key] != nil else { return }
+      self.recordLifecycle("PiP retirement stop unconfirmed controller=\(key)")
+      self.fail("media_engine_cleanup_failed")
     }
     publish()
   }
@@ -427,15 +485,30 @@ final class PlaybackService: NSObject {
   func finishRetiringPiP(_ controller: AVPictureInPictureController) -> Bool {
     let key = ObjectIdentifier(controller)
     guard retiringPiP[key] != nil else { return false }
+    guard !controller.isPictureInPictureActive else { return true }
     controller.delegate = nil
     retiringPiP.removeValue(forKey: key)
+    observedPiPStarts.remove(key)
+    recordLifecycle("PiP retirement confirmed controller=\(key)")
     retiringPiPAbortCompletions.removeValue(forKey: key)?.completion(true)
+    // A mutation may have cleared the queue while preserving AVKit's resources.
+    if currentPath == nil, pendingReplacement == nil, retiringPiP.isEmpty {
+      clearPlaybackEnginesAfterMutation()
+    }
+    reconcileAVPlayerPresentation(reason: "retirement confirmed")
     publish()
     return true
   }
 
   func rejectRetiringPiPStart(_ controller: AVPictureInPictureController) -> Bool {
-    guard retiringPiP[ObjectIdentifier(controller)] != nil else { return false }
+    let key = ObjectIdentifier(controller)
+    if pip === controller || mediaKitPiP?.controller === controller
+      || pendingReplacement?.controller === controller || retiringPiP[key] != nil {
+      observedPiPStarts.insert(key)
+    }
+    guard retiringPiP[key] != nil else { return false }
+    retiringPiP[key]?.requiresTerminal = true
+    recordLifecycle("late PiP start rejected controller=\(key)")
     controller.stopPictureInPicture()
     return true
   }
@@ -578,11 +651,12 @@ final class PlaybackService: NSObject {
       self?.routeChanged(note)
     })
     notifications.append(center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
-      self?.suspendAVPlayerPresentationForBackground(lifecycleTransition: true)
+      self?.recordLifecycle("willResignActive: presentation preserved")
     })
     notifications.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
       guard let self = self else { return }
       self.inBackground = true
+      self.recordLifecycle("didEnterBackground: presentation preserved")
       // Fence playback before a pending scrub/seek completion can resume it.
       self.enforcePlaybackEnvironment()
       if self.scrubbing { self.cancelScrub() }
@@ -594,7 +668,8 @@ final class PlaybackService: NSObject {
     notifications.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
       guard let self = self else { return }
       self.inBackground = false
-      self.restoreAVPlayerPresentationAfterBackground()
+      self.recordLifecycle("didBecomeActive")
+      self.ensureAVPlayerPresentation(reason: "didBecomeActive")
       if self.audioRecoveryPending { self.attemptAudioRecovery(resetAttempts: true) }
       self.tick()
     })
@@ -802,13 +877,20 @@ final class PlaybackService: NSObject {
     guard let request = pendingReplacement, request.controller === controller else { return false }
     guard !controller.isPictureInPictureActive else { return true }
     pendingReplacement = nil; replacementTimeout?.cancel(); replacementTimeout = nil
-    if let renderer = mediaKitPiP, renderer.controller === controller {
-      renderer.stop(); mediaKitPiP = nil; mediaKitPiPActiveRequestID = nil
-    }
+    let renderer = mediaKitPiP?.controller === controller ? mediaKitPiP : nil
+    if renderer != nil { mediaKitPiP = nil; mediaKitPiPActiveRequestID = nil }
     cancelPendingAVPlayerPiP()
+    observedPiPStarts.remove(ObjectIdentifier(controller))
+    renderer?.stop()
     // A late didStop proves release is safe, but must not revive a load which
     // already failed. A fresh explicit load can replace the aborted request.
-    if request.aborted { publish(); return true }
+    if request.aborted {
+      if request.clearOnly { clearPlaybackEnginesAfterMutation() }
+      else { discardAVPlayerPiP() }
+      reconcileAVPlayerPresentation(reason: "aborted replacement stopped")
+      publish()
+      return true
+    }
     if request.clearOnly { clearPlaybackEnginesAfterMutation(); publish() }
     else { performLoad(resume: request.resume, autoplay: request.autoplay) }
     return true
@@ -819,6 +901,7 @@ final class PlaybackService: NSObject {
     mediaKit?.stopPlayback(); mediaKit = nil
     discardAVPlayerPiP()
     observations.removeAll()
+    installedAVPlayerItem = nil
     player.replaceCurrentItem(with: nil)
     loading = false
   }
@@ -858,6 +941,7 @@ final class PlaybackService: NSObject {
       audioRecoveryPending = wantsPlayback
     }
     observations.removeAll()
+    installedAVPlayerItem = nil
     player.replaceCurrentItem(with: nil)
     aPoint = nil; bPoint = nil
     cues = []; subtitleName = ""; subtitleText = ""; surface?.caption.text = ""; surface?.caption.isHidden = true
@@ -894,7 +978,7 @@ final class PlaybackService: NSObject {
         openMediaKit(url: url, resume: resume, token: token)
         return
       }
-      attachAVPlayerPresentationIfAllowed()
+      attachAVPlayerPresentationIfAllowed(reason: "initial load")
       scheduleOpenTimeout(token: token)
       let task = Task.detached(priority: .userInitiated) { [weak self] in
         do {
@@ -928,6 +1012,8 @@ final class PlaybackService: NSObject {
   }
 
   private func install(_ asset: AVAsset, origin: Double, url: URL, path: String, resume: Bool, token: Int) {
+    guard generation == token, currentPath == path, mediaKit == nil,
+          pendingReplacement == nil, !seekFault, errorMessage.isEmpty else { return }
     timelineOrigin = origin
     let item = AVPlayerItem(asset: asset)
     itemCreations += 1
@@ -936,7 +1022,8 @@ final class PlaybackService: NSObject {
     var prepared = false
     observations.append(item.observe(\.status, options: [.new]) { [weak self] item, _ in
       DispatchQueue.main.async {
-        guard let self = self, self.generation == token, self.mediaKit == nil else { return }
+        guard let self = self, self.generation == token, self.mediaKit == nil,
+              self.player.currentItem === item, self.currentPath == path, !self.seekFault else { return }
         if item.status == .failed {
           self.fallbackToMediaKit(url: url, resume: resume, token: token, error: item.error ?? LibraryFailure.app("media_unsupported")); return
         }
@@ -944,6 +1031,7 @@ final class PlaybackService: NSObject {
         prepared = true
         self.openingTimeout?.cancel()
         self.timelineReady = true
+        self.ensureAVPlayerPresentation(reason: "item ready")
         self.loadTracks(item)
         let startToken = self.introToken
         self.library.recordStore.readPlaybackRecord(path: path) { [weak self, weak item] record in
@@ -962,7 +1050,9 @@ final class PlaybackService: NSObject {
         }
       }
     })
+    installedAVPlayerItem = (item, path, token)
     player.replaceCurrentItem(with: item)
+    ensureAVPlayerPresentation(reason: "item installed")
     publish()
   }
 
@@ -1335,8 +1425,9 @@ final class PlaybackService: NSObject {
   }
 
   private func recordLifecycle(_ event: String) {
+    let binding = "appState=\(UIApplication.shared.applicationState.rawValue) layer=\(surface.map { String(describing: ObjectIdentifier($0.videoLayer)) } ?? "nil") boundPlayer=\(surface?.videoLayer.player.map { String(describing: ObjectIdentifier($0)) } ?? "nil") retiring=\(retiringPiP.count)"
     let identities = "player=\(ObjectIdentifier(player)) item=\(player.currentItem.map { String(describing: ObjectIdentifier($0)) } ?? "nil") pip=\(pip.map { String(describing: ObjectIdentifier($0)) } ?? "nil")"
-    lifecycleEvents.append("generation=\(generation) operation=\(playbackOperation) \(identities) \(event)")
+    lifecycleEvents.append("generation=\(generation) operation=\(playbackOperation) \(identities) \(binding) \(event)")
     if lifecycleEvents.count > 40 { lifecycleEvents.removeFirst(lifecycleEvents.count - 40) }
   }
 
@@ -1629,7 +1720,13 @@ final class PlaybackService: NSObject {
     view.videoLayer.videoGravity = fit == "fill" ? .resizeAspectFill : fit == "stretch" ? .resize : .resizeAspect
     view.caption.text = subtitleText
     view.caption.isHidden = subtitleText.isEmpty
-    attachAVPlayerPresentationIfAllowed()
+    if hasValidAVPlayerPresentationItem && (avPlayerPiPAuthorized || pipActive) {
+      // Preserve the explicit PiP handoff path; prepare itself will not rebuild
+      // a controller while its start/stop handshake owns the existing layer.
+      attachAVPlayerPresentationIfAllowed(reason: "authorized PiP surface attached")
+    } else {
+      ensureAVPlayerPresentation(reason: "surface attached")
+    }
   }
 
   private func tick() {
@@ -2050,6 +2147,7 @@ final class PlaybackService: NSObject {
     }
     cancelSeeks()
     guard generation == token else { return }
+    installedAVPlayerItem = nil
     player.pause(); player.replaceCurrentItem(with: nil)
     observations.removeAll()
     timelineReady = false; timelineOrigin = 0; preparedMediaKit = false
@@ -2194,14 +2292,9 @@ final class PlaybackService: NSObject {
           self.publish()
           return
         }
-        self.pipPossibleObservation?.invalidate()
-        self.pipPossibleObservation = nil
-        self.avPlayerPiPAuthorized = false
         self.revokeManualPiP()
-        self.retirePiP(controller)
-        self.cancelPendingAVPlayerPiP()
-        self.pip = nil
-        self.suspendAVPlayerPresentationForBackground()
+        self.discardAVPlayerPiP()
+        self.reconcileAVPlayerPresentation(reason: "PiP activation expired")
         self.notice?("pip_start_failed")
         self.publish()
       }
@@ -2218,15 +2311,16 @@ final class PlaybackService: NSObject {
     avPlayerPiPAuthorized = false
     revokeManualPiP()
     cancelPendingAVPlayerPiP()
-    suspendAVPlayerPresentationForBackground()
+    observedPiPStarts.remove(ObjectIdentifier(controller))
+    reconcileAVPlayerPresentation(reason: "PiP stopped or failed")
     publish()
   }
 
   func didStartAVPlayerPiP(_ controller: AVPictureInPictureController) {
     guard pip === controller else { return }
+    observedPiPStarts.insert(ObjectIdentifier(controller))
     guard avPlayerPiPAuthorized else {
-      controller.stopPictureInPicture()
-      suspendAVPlayerPresentationForBackground()
+      _ = rejectUnauthorizedAVPlayerPiPStart(controller)
       return
     }
     pipActivationTimeout?.cancel()
@@ -2235,9 +2329,19 @@ final class PlaybackService: NSObject {
   }
 
   func rejectUnauthorizedAVPlayerPiPStart(_ controller: AVPictureInPictureController) -> Bool {
-    guard pip === controller, !avPlayerPiPAuthorized else { return false }
-    controller.stopPictureInPicture()
-    suspendAVPlayerPresentationForBackground()
+    guard pip === controller else { return false }
+    observedPiPStarts.insert(ObjectIdentifier(controller))
+    guard !avPlayerPiPAuthorized else { return false }
+    recordLifecycle("unauthorized PiP start rejected controller=\(ObjectIdentifier(controller))")
+    revokeManualPiP()
+    if pendingReplacement?.controller === controller {
+      // The replacement already owns the stop fence; do not steal its callback.
+      controller.stopPictureInPicture()
+    } else {
+      // observedPiPStarts makes this explicit retirement even during willStart,
+      // when AVKit still reports isPictureInPictureActive=false.
+      discardAVPlayerPiP()
+    }
     publish()
     return true
   }
@@ -2302,8 +2406,8 @@ final class PlaybackService: NSObject {
         guard let self = self, let renderer = renderer, self.mediaKitPiP === renderer else { return }
         self.mediaKitPiPActiveRequestID = nil
         self.revokeManualPiP()
-        self.retirePiP(renderer.controller, renderer: renderer)
         self.mediaKitPiP = nil
+        self.retirePiP(renderer.controller, renderer: renderer)
         self.restoreMediaKitVideoOutput()
       }
       let seekGeneration = generation
@@ -2354,9 +2458,10 @@ final class PlaybackService: NSObject {
     if finishPendingReplacement(controller) { return }
     guard let renderer = mediaKitPiP, renderer.controller === controller else { return }
     revokeManualPiP()
-    renderer.stop()
     mediaKitPiP = nil
     mediaKitPiPActiveRequestID = nil
+    observedPiPStarts.remove(ObjectIdentifier(controller))
+    renderer.stop()
     restoreMediaKitVideoOutput()
   }
 
@@ -2385,7 +2490,9 @@ final class PlaybackService: NSObject {
           !mediaKitPiPRestoring else { completion(false); return }
     let controller = renderer.controller
     let key = ObjectIdentifier(controller)
-    let waitForDidStop = renderer.isActive
+    let waitForDidStop = AVPlayerPresentationPolicy.requiresTerminal(
+      startIssued: renderer.startIssued, startObserved: observedPiPStarts.contains(key),
+      active: renderer.isActive)
     if waitForDidStop {
       let abortToken = UUID()
       retiringPiPAbortCompletions[key] = (abortToken, completion)
@@ -2399,8 +2506,8 @@ final class PlaybackService: NSObject {
     }
     mediaKitPiPActiveRequestID = nil
     revokeManualPiP()
-    retirePiP(controller, renderer: renderer)
     mediaKitPiP = nil
+    retirePiP(controller, renderer: renderer)
     publish()
     if !waitForDidStop { completion(true) }
   }
@@ -2462,9 +2569,10 @@ final class PlaybackService: NSObject {
     mediaKitPiPPreparing = false
     mediaKitPiPRequestID = nil
     mediaKitPiPActiveRequestID = nil
-    if let renderer = mediaKitPiP { retirePiP(renderer.controller, renderer: renderer) }
+    let renderer = mediaKitPiP
     mediaKitPiP = nil
     mediaKitPiPRestoring = false
+    if let renderer = renderer { retirePiP(renderer.controller, renderer: renderer) }
   }
 
   private func clearBoundary() {
