@@ -586,8 +586,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       case "restoreBrightness": playback.restoreBrightness()
       case "playerDismissed":
         pendingMediaKitPiPToken = nil; pendingMediaKitPiPSourceView = nil
-        pipRestoreCompletion?(false)
-        pipRestoreCompletion = nil; pipRestoreToken = nil; pipRestoreController = nil
+        completePiPRestore(false)
         playback.playerDismissed()
       case "pipRestoreAllowed":
         result(Self.matchesPiPRestoreToken(expected: pipRestoreToken,
@@ -605,15 +604,11 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
           result(false); return
         }
         guard let controller = pipRestoreController, playback.allowsPiPRestore(controller) else {
-          pipRestoreCompletion?(false)
-          pipRestoreCompletion = nil; pipRestoreToken = nil; pipRestoreController = nil
+          completePiPRestore(false)
           playback.recordPiPFailure("stale restore request")
           result(false); return
         }
-        pipRestoreCompletion?(true)
-        pipRestoreCompletion = nil
-        pipRestoreToken = nil
-        pipRestoreController = nil
+        completePiPRestore(true)
       case "pip":
         let pipToken = UUID()
         pendingMediaKitPiPToken = playback.usesMediaKit ? pipToken : nil
@@ -703,34 +698,47 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     return controller
   }
 
+  private func completePiPRestore(_ restored: Bool) {
+    let completion = pipRestoreCompletion
+    let token = pipRestoreToken
+    let controller = pipRestoreController
+    pipRestoreCompletion = nil; pipRestoreToken = nil; pipRestoreController = nil
+    if let token, let controller {
+      playback.completePiPRestore(controller, token: token, restored: restored)
+    }
+    completion?(restored)
+  }
+
   func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+    playback.recordPiPDelegateEntry("restore", controller: pictureInPictureController)
     guard playback.allowsPiPRestore(pictureInPictureController) else {
       completionHandler(false)
       return
     }
-    guard sink != nil else {
-      pipRestoreCompletion?(false)
-      pipRestoreCompletion = nil
-      pipRestoreToken = nil
+    completePiPRestore(false)
+    let token = UUID()
+    guard playback.beginPiPRestore(pictureInPictureController, token: token) else {
       completionHandler(false)
       return
     }
-    pipRestoreCompletion?(false)
-    let token = UUID()
     pipRestoreToken = token
     pipRestoreController = pictureInPictureController
     pipRestoreCompletion = completionHandler
+    guard sink != nil else { completePiPRestore(false); return }
     sink?(["type": "openPlayer", "restoreToken": token.uuidString])
     DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
       guard self?.pipRestoreToken == token else { return }
-      self?.pipRestoreCompletion?(false)
-      self?.pipRestoreCompletion = nil
-      self?.pipRestoreToken = nil
-      self?.pipRestoreController = nil
+      self?.completePiPRestore(false)
     }
   }
 
+  func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    playback.recordPiPDelegateEntry("willStop", controller: pictureInPictureController)
+    playback.willStopPiP(pictureInPictureController)
+  }
+
   func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    playback.recordPiPDelegateEntry("didStop", controller: pictureInPictureController)
     playback.recordAVPlayerPiPEvent("delegate didStop", controller: pictureInPictureController)
     if playback.finishRetiringPiP(pictureInPictureController, avTerminal: .didStop) { return }
     if playback.pip === pictureInPictureController {
@@ -741,20 +749,25 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   }
 
   func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    playback.recordPiPDelegateEntry("willStart", controller: pictureInPictureController)
     playback.recordAVPlayerPiPEvent("delegate willStart", controller: pictureInPictureController)
     if playback.rejectRetiringPiPStart(pictureInPictureController) { return }
     _ = playback.rejectUnauthorizedAVPlayerPiPStart(pictureInPictureController)
   }
 
   func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    playback.recordPiPDelegateEntry("didStart", controller: pictureInPictureController)
     playback.recordAVPlayerPiPEvent("delegate didStart", controller: pictureInPictureController)
     if playback.rejectRetiringPiPStart(pictureInPictureController) { return }
     if playback.pip === pictureInPictureController {
       playback.didStartAVPlayerPiP(pictureInPictureController)
+    } else if playback.ownsMediaKitPiP(pictureInPictureController) {
+      playback.didStartMediaKitPiP(pictureInPictureController)
     }
   }
 
   func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
+    playback.recordPiPDelegateEntry("failedToStart", controller: pictureInPictureController, error: error)
     playback.recordAVPlayerPiPEvent("delegate failedToStart", controller: pictureInPictureController, error: error)
     if playback.finishRetiringPiP(pictureInPictureController, avTerminal: .failedToStart) { return }
     guard playback.pip === pictureInPictureController || playback.ownsMediaKitPiP(pictureInPictureController) else { return }
@@ -762,7 +775,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     if playback.pip === pictureInPictureController {
       playback.finishAVPlayerPiP(pictureInPictureController, terminal: .failedToStart)
     } else if playback.ownsMediaKitPiP(pictureInPictureController) {
-      playback.finishMediaKitPiP(pictureInPictureController)
+      playback.finishMediaKitPiP(pictureInPictureController, terminal: .failedToStart)
     }
   }
 }

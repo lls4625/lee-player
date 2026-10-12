@@ -94,6 +94,8 @@ final class LeeMediaKitEngine {
 }
 struct Pending { var autoplay:Bool }
 final class Service {
+ var avPlayerTransportMutationDepth = 0
+ func endInlinePiPTransportFollow() {}
  var currentSessionID = UUID()
  var currentSessionPositionRestore: CurrentSessionPositionRestore?
  func restoreCurrentSessionPositionIfNeeded(engine: LeeMediaKitEngine, generation: Int) -> Bool { false }

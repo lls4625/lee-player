@@ -279,7 +279,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
     final success = await m.seek(target);
     if (!mounted) return;
     setState(() => jumping = false);
-    if (!success || m.path != path || m.state['generation'] != generation) return;
+    if (!success || pipActive || m.path != path || m.state['generation'] != generation) return;
     feedbackTimer?.cancel();
     feedbackGeneration = generation;
     setState(
@@ -297,8 +297,11 @@ class _PlaybackPageState extends State<PlaybackPage> {
   Object? dragPlaybackGeneration;
   int dragGeneration = 0;
   bool endingDrag = false;
-  bool get canSeek => m.duration > 0 && m.state['seekable'] == true;
+  bool get pipActive => m.state['pipActive'] == true;
+  bool wasPiPActive = false;
+  bool get canSeek => !pipActive && m.duration > 0 && m.state['seekable'] == true;
   void updateDrag(double value) {
+    if (pipActive) return;
     if (dragging == null || endingDrag) {
       dragGeneration++;
       endingDrag = false;
@@ -316,7 +319,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
   }
   void flushPreview() {
     previewTimer = null;
-    if (!mounted || dragging == null || endingDrag || dragPath != m.path ||
+    if (!mounted || pipActive || dragging == null || endingDrag || dragPath != m.path ||
         dragPlaybackGeneration != m.state['generation']) return;
     if (lastPreview != dragging) {
       m.previewSeek(dragging!);
@@ -325,6 +328,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
     previewTimer = Timer(const Duration(milliseconds: 120), flushPreview);
   }
   Future<void> endDrag(double value) async {
+    if (pipActive) return;
     previewTimer?.cancel(); previewTimer = null;
     endingDrag = true;
     final generation = dragGeneration;
@@ -357,6 +361,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
   @override
   void initState() {
     super.initState();
+    wasPiPActive = pipActive;
     m.addListener(changed);
     // Entering the player applies the persisted playback brightness while the
     // native service keeps the current system brightness for restoration.
@@ -365,6 +370,20 @@ class _PlaybackPageState extends State<PlaybackPage> {
     }
   }
   void changed() {
+    if (pipActive && !wasPiPActive) {
+      // Removing gesture widgets also fences work already queued by a drag.
+      // Keep the source video mounted for AVKit and preserve inline UI choices.
+      previewTimer?.cancel(); previewTimer = null;
+      final cancelDrag = dragging != null && !endingDrag;
+      dragGeneration++; dragging = null; endingDrag = false; lastPreview = null;
+      levelUpdateTimer?.cancel(); levelUpdateTimer = null;
+      levelFeedbackTimer?.cancel(); levelFeedbackTimer = null;
+      levelKind = null; levelValue = null;
+      feedbackTimer?.cancel(); feedbackTimer = null; seekFeedback = null;
+      wasPiPActive = true;
+      if (cancelDrag) unawaited(m.cancelScrub());
+    }
+    wasPiPActive = pipActive;
     if (seekFeedback != null && feedbackGeneration != m.state['generation']) {
       feedbackTimer?.cancel(); seekFeedback = null;
     }
@@ -423,6 +442,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
   }
 
   void startLevelDrag(String kind) {
+    if (pipActive) return;
     levelUpdateTimer?.cancel();
     levelUpdateTimer = null;
     levelFeedbackTimer?.cancel();
@@ -437,7 +457,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
   }
 
   void updateLevelDrag(DragUpdateDetails details) {
-    if (levelKind == null || levelValue == null) return;
+    if (pipActive || levelKind == null || levelValue == null) return;
     levelDragDistance += details.primaryDelta ?? 0;
     final height = context.size?.height ?? MediaQuery.sizeOf(context).height;
     final travel = height * .8 < 320 ? 320.0 : height * .8;
@@ -456,11 +476,11 @@ class _PlaybackPageState extends State<PlaybackPage> {
     levelUpdateTimer = null;
     final kind = levelKind;
     final value = levelValue;
-    if (kind != null && value != null) unawaited(m.configure({kind: value}));
+    if (!pipActive && kind != null && value != null) unawaited(m.configure({kind: value}));
   }
 
   void finishLevelDrag() {
-    if (levelKind == null) return;
+    if (pipActive || levelKind == null) return;
     flushLevelUpdate();
     levelFeedbackTimer?.cancel();
     levelFeedbackTimer = Timer(const Duration(milliseconds: 800), () {
@@ -525,7 +545,8 @@ class _PlaybackPageState extends State<PlaybackPage> {
     }
   }
   Future<void> requestPiP() async {
-    if (pipCommandPending || m.state['pipRequesting'] == true) return;
+    if (pipCommandPending || m.state['pipRequesting'] == true ||
+        m.state['pipAvailable'] != true || m.presentationWaiting) return;
     final debounce = Stopwatch()..start();
     setState(() => pipCommandPending = true);
     try {
@@ -1089,14 +1110,16 @@ class _PlaybackPageState extends State<PlaybackPage> {
   ]);
 
   Widget videoContent(BuildContext context) => Stack(fit: StackFit.expand, children: [
-    ColoredBox(color: Colors.black,
+    IgnorePointer(key: const ValueKey('pip-source-pointer-gate'), ignoring: pipActive,
+      child: ColoredBox(color: Colors.black,
       child: m.state['engine'] == 'media_kit'
         ? m.mediaKit.controller != null && m.mediaKit.engineId == m.state['engineId']
           ? Video(key: ValueKey(m.mediaKit.engineId), controller: m.mediaKit.controller!, controls: NoVideoControls,
               pauseUponEnteringBackgroundMode: false,
               fit: m.state['fit'] == 'stretch' ? BoxFit.fill : m.state['fit'] == 'fill' ? BoxFit.cover : BoxFit.contain)
           : const SizedBox.expand()
-        : UiKitView(key: videoKey, viewType: 'lei.player/video')),
+        : UiKitView(key: videoKey, viewType: 'lei.player/video'))),
+    if (!pipActive) ...[
     if (m.state['isAudio'] == true)
       Center(child: Container(width: 156, height: 156,
         decoration: BoxDecoration(borderRadius: BorderRadius.circular(40),
@@ -1179,7 +1202,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
                     child: CircularProgressIndicator(strokeWidth: 2))
                 : const Icon(Icons.picture_in_picture_alt),
               '画中画', pipCommandPending || m.state['pipRequesting'] == true ||
-                m.presentationWaiting ? null : requestPiP),
+                m.state['pipAvailable'] != true || m.presentationWaiting ? null : requestPiP),
             const SizedBox(width: 12, height: 12),
           ],
           playbackButton(const Icon(Icons.screen_rotation), '横竖屏', rotating ? null : rotate),
@@ -1200,6 +1223,12 @@ class _PlaybackPageState extends State<PlaybackPage> {
               maxLines: 2, overflow: TextOverflow.ellipsis)),
         progressBar(context),
       ])))),
+    ] else ...[
+      // Leave the system's source presentation visible. The permanent pointer
+      // gate above blocks input without covering or unmounting either engine.
+      Positioned(top: 8, left: 12, child: playbackButton(
+        const Icon(Icons.arrow_back_ios_new), '返回课程库', () => Navigator.of(context).pop())),
+    ],
   ]);
 
   @override
@@ -1210,7 +1239,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
     child: Builder(builder: (context) => DefaultTextStyle(
       style: Theme.of(context).textTheme.bodyMedium!,
       child: IconTheme(data: const IconThemeData(color: Colors.white),
-        child: PopScope(canPop: !locked,
+        child: PopScope(canPop: pipActive || !locked,
           onPopInvokedWithResult: (didPop, _) { if (didPop) dismissPlayer(); },
           child: GlassScaffold(
           background: const ColoredBox(color: Colors.black),

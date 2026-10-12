@@ -1,4 +1,5 @@
 import Foundation
+import Dispatch
 
 // PRODUCTION_POLICY
 
@@ -7,12 +8,21 @@ import Foundation
 enum ReviewStatus: Int { case unknown = 0, readyToPlay = 1, failed = 2 }
 final class AVPlayerItem { var status = ReviewStatus.readyToPlay }
 final class AVPlayer {
+  struct RateDidChangeReason: RawRepresentable, Equatable {
+    var rawValue: String
+    static let setRateCalled = Self(rawValue: "setRateCalled")
+    static let appBackgrounded = Self(rawValue: "appBackgrounded")
+    static let audioSessionInterrupted = Self(rawValue: "audioSessionInterrupted")
+    static let setRateFailed = Self(rawValue: "setRateFailed")
+  }
+  static let rateDidChangeNotification = Notification.Name("review.playerRateDidChange")
+  static let rateDidChangeReasonKey = "review.rateReason"
   enum TimeControlStatus: Int { case paused, waitingToPlayAtSpecifiedRate, playing }
   var timeControlStatus = TimeControlStatus.paused
   var currentItem: AVPlayerItem?
   var status = ReviewStatus.readyToPlay
   var isMuted = false
-  var rate: Float = 0 { didSet { rateChanged?() } }
+  var rate: Float = 1 { didSet { rateChanged?() } }
   var rateChanged: (() -> Void)?
   var volume: Float = 1
   var allowsExternalPlayback = false
@@ -28,21 +38,48 @@ final class AVPlayer {
   }
 }
 enum ReviewGravity { case resizeAspect, resizeAspectFill, resize }
-final class VideoLayer {
-  var isReadyForDisplay = true
+class CALayer {
   var bounds = CGRect(x: 0, y: 0, width: 320, height: 180)
-  var player: AVPlayer?
+  var frame = CGRect(x: 0, y: 0, width: 320, height: 180)
   var isHidden = false
+  var opacity: Float = 1
+  weak var superlayer: CALayer?
+  func convert(_ rect: CGRect, to layer: CALayer?) -> CGRect { rect }
+}
+final class VideoLayer: CALayer {
+  var isReadyForDisplay = true
+  var player: AVPlayer?
+  var videoRect = CGRect(x: 0, y: 0, width: 320, height: 180)
   var videoGravity = ReviewGravity.resizeAspect
 }
+class UIView {
+  var layer: CALayer = CALayer()
+  var bounds = CGRect(x: 0, y: 0, width: 320, height: 180)
+  var isHidden = false
+  var alpha: CGFloat = 1
+  var clipsToBounds = false
+  var superview: UIView?
+  var window: ReviewWindow?
+  func convert(_ rect: CGRect, to view: UIView?) -> CGRect { rect }
+}
+final class ReviewScene {
+  enum State: Int { case foregroundActive, foregroundInactive, background }
+  var activationState = State.foregroundActive
+}
+final class ReviewWindow: UIView {
+  var isKeyWindow = true
+  var windowScene: ReviewScene? = ReviewScene()
+}
 final class ReviewCaption { var text: String?; var isHidden = true }
-final class PlayerSurface {
-  var window: ReviewWindow? = ReviewWindow()
+final class PlayerSurface: UIView {
   var videoLayer = VideoLayer()
   var isolatedLayers: [VideoLayer] = []
+  override init() {
+    super.init(); layer = videoLayer; window = ReviewWindow()
+  }
   func isolateVideoLayer(_ retained: VideoLayer) {
     guard videoLayer === retained else { return }
-    isolatedLayers.append(retained); videoLayer = VideoLayer()
+    isolatedLayers.append(retained); videoLayer = VideoLayer(); videoLayer.superlayer = layer
   }
   func releaseIsolatedVideoLayer(_ retained: VideoLayer) {
     isolatedLayers.removeAll { $0 === retained }
@@ -50,7 +87,23 @@ final class PlayerSurface {
   let caption = ReviewCaption()
   var onLayout: (() -> Void)?
 }
-final class ReviewWindow {}
+// Read-only diagnostic collaborators. Geometry conversion is identity here;
+// UIKit transforms, window composition and actual audio routes require iOS.
+struct ReviewAudioValue { let rawValue: String }
+struct ReviewAudioOptions { let rawValue: UInt }
+struct ReviewPort { let portType: ReviewAudioValue; let portName = "PRIVATE_DEVICE_NAME" }
+final class ReviewRoute {
+  var inputs: [ReviewPort] = []
+  var outputs = [ReviewPort(portType: ReviewAudioValue(rawValue: "Speaker"))]
+}
+final class AVAudioSession {
+  static let shared = AVAudioSession()
+  static func sharedInstance() -> AVAudioSession { shared }
+  var category = ReviewAudioValue(rawValue: "AVAudioSessionCategoryPlayback")
+  var mode = ReviewAudioValue(rawValue: "AVAudioSessionModeMoviePlayback")
+  var categoryOptions = ReviewAudioOptions(rawValue: 0)
+  let currentRoute = ReviewRoute()
+}
 final class UIApplication {
   enum State: Int { case active, inactive, background }
   static let shared = UIApplication()
@@ -76,23 +129,57 @@ struct LibraryFailure: Error {
 }
 final class AVPictureInPictureController {
   static var initialPossible = false
+  static var onCreate: ((AVPictureInPictureController) -> Void)?
   // AVPictureInPictureController.playerLayer is non-optional in Apple's Swift
   // interface. Only ContentSource.playerLayer is optional.
-  let playerLayer: VideoLayer
+  final class ContentSource {
+    var playerLayer: VideoLayer?
+    init(playerLayer: VideoLayer?) { self.playerLayer = playerLayer }
+  }
+  var contentSourceClearCount = 0
+  var onContentSourceClear: (() -> Void)?
+  var contentSource: ContentSource? {
+    didSet {
+      if contentSource == nil {
+        contentSourceClearCount += 1
+        onContentSourceClear?()
+      }
+    }
+  }
+  var playerLayerReads = 0
+  var playerLayer: VideoLayer {
+    playerLayerReads += 1
+    guard let sourceLayer = contentSource?.playerLayer else {
+      fatalError("Review forbids controller.playerLayer access after contentSource release")
+    }
+    return sourceLayer
+  }
   var delegate: AVPictureInPictureControllerDelegate?
   var canStartPictureInPictureAutomaticallyFromInline = true
-  var isPictureInPictureActive = false
+  private var active = false
+  var activeReadSequence: [Bool] = []
+  var isPictureInPictureActive: Bool {
+    get { activeReadSequence.isEmpty ? active : activeReadSequence.removeFirst() }
+    set { active = newValue }
+  }
   var isPictureInPictureSuspended = false
-  var isPictureInPicturePossible = false { didSet { changed?() } }
+  private var possible = false
+  var possibleReadSequence: [Bool] = []
+  var isPictureInPicturePossible: Bool {
+    get { possibleReadSequence.isEmpty ? possible : possibleReadSequence.removeFirst() }
+    set { possible = newValue; changed?() }
+  }
   var changed: (() -> Void)?
   var starts = 0
+  var onStart: (() -> Void)?
   var onStop: (() -> Void)?
   var stops = 0
   init?(playerLayer: VideoLayer) {
-    self.playerLayer = playerLayer
+    self.contentSource = ContentSource(playerLayer: playerLayer)
     isPictureInPicturePossible = Self.initialPossible
+    Self.onCreate?(self)
   }
-  func startPictureInPicture() { starts += 1 }
+  func startPictureInPicture() { starts += 1; onStart?() }
   static func isPictureInPictureSupported() -> Bool { true }
   func stopPictureInPicture() { stops += 1; onStop?() }
   func observe<T>(_ keyPath: KeyPath<AVPictureInPictureController, T>,
@@ -187,6 +274,10 @@ final class PresentationReviewHost {
   var pipPossibleObservation: NSKeyValueObservation?
   var pipActivationTimeout: DispatchWorkItem?
   var pipStartIssued = false
+  var pipPlaybackSession: (id: UUID, controller: ObjectIdentifier, generation: Int,
+    restoreToken: UUID?, stopping: Bool, inline: Bool)?
+  var pipTransportObservation: NSObjectProtocol?
+  var avPlayerTransportMutationDepth = 0
   var avPlayerPiPRequest: (id: UUID, generation: Int, item: AVPlayerItem, layer: AVPlayerLayer, deadline: Double?)?
   var avPlayerPiPTraceRequests: [(controller: ObjectIdentifier, request: UUID, generation: Int)] = []
   var avPlayerPiPAuthorized = false
@@ -292,6 +383,18 @@ final class PresentationReviewHost {
     pipDelegate = ownedDelegate; installIdentity()
     notice = { [weak self] in self?.notices.append($0) }
   }
+  deinit {
+    if let observation = pipTransportObservation { NotificationCenter.default.removeObserver(observation) }
+  }
+  func queuePiPTransport(reason: AVPlayer.RateDidChangeReason? = .setRateCalled) -> () -> Void {
+    let owner = player; let item = player.currentItem!; let controllerID = ObjectIdentifier(pip!)
+    let id = pipPlaybackSession!.id; let token = generation
+    return { [weak self] in
+      guard reason == .setRateCalled else { return }
+      self?.mirrorPiPTransport(owner, item: item, controllerID: controllerID,
+        sessionID: id, generation: token)
+    }
+  }
   func installIdentity() {
     let item = AVPlayerItem()
     player.currentItem = item
@@ -305,7 +408,7 @@ final class PresentationReviewHost {
   func finishTrackSelection(_ message: String) {}
   func cancelIntroDetection() {}
   func cancelSeeks() {}
-  func pauseEngine() { pauses += 1; player.pause(); enginePlaying = false }
+  func pauseEngine() { endInlinePiPTransportFollow(); pauses += 1; player.pause(); enginePlaying = false }
   func clearBoundary() { boundaryRemovalOwners.append(ObjectIdentifier(player)) }
   func bindPlayerObservers() {}
   func activateAudioSession(reason: String = "playback") throws { audioSessionActivations += 1 }
@@ -332,11 +435,13 @@ final class PresentationReviewHost {
     return restoreCurrentSessionPositionIfNeeded(engine: engine, generation: generation)
   }
   func attemptAudioRecovery(resetAttempts: Bool = false) {
+    endInlinePiPTransportFollow()
     audioRecoveryCalls += 1
     player.rate = wantsPlayback && !interrupted && playbackEnvironmentAllowsPlayback ? 1 : 0
   }
 
   func performLoad(resume: Bool, autoplay: Bool) {
+    discardAVPlayerPiP()
     loads += 1; generation += 1
     loadedPaths.append(currentPath ?? ""); loadedAutoplay.append(autoplay)
     wantsPlayback = autoplay && playbackEnvironmentAllowsPlayback
@@ -367,18 +472,29 @@ final class PresentationReviewHost {
   }
 
   func clearPlaybackEnginesAfterMutation() {
+    discardAVPlayerPiP()
     clears += 1; installedAVPlayerItem = nil; player.currentItem = nil; mediaKit = nil; loading = false
   }
+  func sourceSnapshot(_ layer: AVPlayerLayer?) -> String { avPlayerPiPSourceSnapshot(layer: layer) }
   func repair() { ensureAVPlayerPresentation(reason: "review") }
   func rebuildResetPlayer() { replaceFailedPlayerIfNeeded() }
   func initialAttach() { attachAVPlayerPresentationIfAllowed(reason: "initial load") }
   func discard() { discardAVPlayerPiP() }
   func discardRenderer() { discardMediaKitPiP() }
   func reconcile() { reconcileAVPlayerPresentation(reason: "review") }
-  func request(ready: Bool = false) -> AVPictureInPictureController {
+  var available: Bool { pipAvailable }
+  func prepare(ready: Bool = false) -> AVPictureInPictureController {
     AVPictureInPictureController.initialPossible = ready
+    repair()
+    let controller = pip!
+    controller.isPictureInPicturePossible = ready
+    return controller
+  }
+  func resign() { discardUnrequestedAVPlayerPiP() }
+  func request(ready: Bool = true) -> AVPictureInPictureController {
+    let controller = prepare(ready: ready)
     try! startPiP(delegate: ownedDelegate)
-    return pip!
+    return controller
   }
   func failPlayback() { fail("media_playback_failed") }
   func cancel() { revokeManualPiP(); discardAVPlayerPiP() }
@@ -404,8 +520,24 @@ func check(_ condition: @autoclosure () -> Bool, _ message: String) {
 func fresh() -> PresentationReviewHost {
   DispatchQueue.main.scheduled = []; DispatchQueue.main.now = 0
   AVPictureInPictureController.initialPossible = false
+  AVPictureInPictureController.onCreate = nil
   UIApplication.shared.applicationState = .active
   return PresentationReviewHost()
+}
+
+final class PiPBridgeReviewHost {
+  let playback: PresentationReviewHost
+  var pipRestoreCompletion: ((Bool) -> Void)?
+  var pipRestoreToken: UUID?
+  weak var pipRestoreController: AVPictureInPictureController?
+  var events: [[String: Any]] = []
+  var sink: (([String: Any]) -> Void)?
+  init(_ service: PresentationReviewHost) {
+    playback = service
+    sink = { [weak self] in self?.events.append($0) }
+  }
+  func acknowledgeRestore(_ success: Bool) { completePiPRestore(success) }
+  // PRODUCTION_BRIDGE_METHODS
 }
 
 // Exhaustive input matrices execute the actual production policy declaration.
@@ -428,7 +560,7 @@ for terminal in [AVPlayerPiPTerminal.didStop, .failedToStart] {
   check(s.finishRetiringPiP(c, avTerminal:terminal) && s.retiringPiP.isEmpty,
         "typed AV terminal wins over stale active snapshot")
   c.isPictureInPictureActive=false
-  check(s.request().starts == 0, "AV entry is available after confirmed terminal")
+  check(s.request().starts == 1, "AV entry is available after confirmed terminal")
 }
 do {
   let s=fresh(); s.repair(); let c=s.request(ready:true); DispatchQueue.main.advance()
@@ -456,21 +588,33 @@ for bits in 0..<8 {
     == (bits != 0), "retirement matrix")
 }
 
-// Ordinary playback, repair, page recreation, inactive and background never
-// create any PiP controller. This is the product invariant, not a fake SDK claim.
+// Foreground preparation does not request PiP, authorize background playback,
+// or start when KVO changes. Resign removes only that idle registration.
 do {
   let service = fresh(); let player = service.player; let item = player.currentItem
-  service.repair(); service.repair()
-  check(service.surface?.videoLayer.player === player && service.pip == nil,
-        "ordinary repair binds only the player layer")
-  for state in [UIApplication.State.inactive, .background, .active] {
+  service.repair(); service.repair(); let idle = service.pip!
+  check(service.surface?.videoLayer.player === player && service.pipCreations == 1,
+        "ordinary foreground repair prepares exactly one controller")
+  check(!service.busy && !service.available && !service.avPlayerPiPAuthorized
+        && service.manualPiPSession == nil && service.avPlayerPiPRequest == nil,
+        "idle preparation is neither a request nor background permission")
+  idle.isPictureInPicturePossible = true; DispatchQueue.main.advance()
+  check(idle.starts == 0 && service.available && !service.busy,
+        "KVO publishes readiness without ever issuing a start")
+  service.resign()
+  check(service.pip == nil && idle.delegate == nil && idle.changed == nil,
+        "willResign releases idle controller and KVO before Home")
+  for state in [UIApplication.State.inactive, .background] {
     UIApplication.shared.applicationState = state; service.reconcile()
-    check(service.pip == nil && service.surface?.videoLayer.player === player,
-          "ordinary app transitions preserve layer with zero controllers")
+    check(service.pip == nil && service.surface?.videoLayer.player === player && player.currentItem === item,
+          "zero-click Home keeps healthy video graph and does not reprepare outside foreground")
   }
+  UIApplication.shared.applicationState = .active; service.repair()
+  check(service.pip !== idle && service.pipCreations == 2 && !service.busy,
+        "return to foreground reprepares without a manual request")
   service.attachSurface(PlayerSurface())
-  check(service.pipCreations == 0 && player.currentItem === item,
-        "surface replacement retains media without preparing PiP")
+  check(service.pipCreations == 3 && player.currentItem === item,
+        "idle surface replacement prepares only for the new layer and preserves media")
 }
 do {
   let service = fresh(); service.installedAVPlayerItem = nil; service.player.currentItem = nil
@@ -480,7 +624,8 @@ do {
   check(service.surface?.videoLayer.player === service.player && service.pip == nil,
         "initial load may bind before async install without a controller")
   service.installIdentity(); service.repair()
-  check(service.pip == nil && service.pipCreations == 0, "item ready still does not prepare PiP")
+  check(service.pip != nil && service.pipCreations == 1 && !service.busy,
+        "item ready supplies idle preparation without authorization")
 }
 for invalid in 0..<6 {
   let service = fresh()
@@ -507,32 +652,37 @@ do {
   check(service.surface?.videoLayer.player === service.player, "authorized handoff allowed")
 }
 do {
-  let service = fresh(); service.repair(); let controller = service.request()
-  check(service.busy && service.pipCreations == 1 && controller.starts == 0,
-        "explicit cold request publishes preparation without synchronous rejection")
-  DispatchQueue.main.advance()
-  check(controller.starts == 0, "not possible keeps bounded observation")
-  do { try service.startPiP(delegate: service.ownedDelegate); check(false, "repeat must reject") }
-  catch { check(service.pipCreations == 1, "repeat cannot create another controller") }
+  let service = fresh(); let controller = service.prepare()
+  try! service.startPiP(delegate: service.ownedDelegate)
+  DispatchQueue.main.advance(30)
+  check(controller.starts == 0 && !service.busy && !service.avPlayerPiPAuthorized
+        && service.avPlayerPiPRequest == nil && service.pipActivationTimeout == nil,
+        "unready stale UI tap is quiet and creates neither a request nor an automatic future start")
   controller.isPictureInPicturePossible = true; DispatchQueue.main.advance()
-  check(controller.starts == 1 && service.pipStartIssued, "possible KVO issues one start")
+  check(controller.starts == 0 && service.available, "readiness after an ignored tap still needs another explicit tap")
+  try! service.startPiP(delegate: service.ownedDelegate)
+  check(controller.starts == 1 && service.pipStartIssued && service.busy && service.pipCreations == 1,
+        "ready button directly starts the already-prepared controller")
+  do { try service.startPiP(delegate: service.ownedDelegate); check(false, "repeat must reject") }
+  catch { check(controller.starts == 1 && service.pipCreations == 1, "repeat cannot duplicate controller or start") }
   controller.isPictureInPicturePossible = false; controller.isPictureInPicturePossible = true
   DispatchQueue.main.advance()
   check(controller.starts == 1, "repeat readiness cannot start twice")
   controller.isPictureInPictureActive = true; service.didStartAVPlayerPiP(controller)
   DispatchQueue.main.fireAll()
   check(service.pip === controller && service.notices.isEmpty, "successful activation cancels watchdog")
+  service.repair(); check(service.pip === controller && service.pipCreations == 1,
+        "active PiP return never builds a replacement")
   controller.isPictureInPictureActive = false; service.terminal(controller)
-  check(service.pip == nil && !service.busy && service.pipCreations == 1,
-        "normal stop releases controller without automatic reprepare")
-  service.repair(); check(service.pip == nil, "post-stop repair remains controller free")
+  check(service.pip !== controller && service.pip != nil && !service.busy && service.pipCreations == 2,
+        "terminal restores a fresh idle preparation in foreground without starting")
 }
 for state in [UIApplication.State.inactive, .background] {
-  let service = fresh(); service.repair(); let controller = service.request()
-  UIApplication.shared.applicationState = state
-  service.reconcile(); controller.isPictureInPicturePossible = true; DispatchQueue.main.advance()
-  check(controller.starts == 1 && service.avPlayerPiPAuthorized,
-        "tap then immediate Home/inactive must retain the authorized request")
+  let service = fresh(); let controller = service.request()
+  service.resign(); UIApplication.shared.applicationState = state
+  service.reconcile(); DispatchQueue.main.advance()
+  check(controller.starts == 1 && service.pip === controller && service.avPlayerPiPAuthorized,
+        "tap then immediate Home/inactive retains the authorized controller")
   check(service.surface?.videoLayer.player === service.player,
         "manual handoff keeps source attached")
   check(BackgroundPlaybackPolicy.permitsPlayback(backgroundEnabled: false, inBackground: true,
@@ -540,65 +690,38 @@ for state in [UIApplication.State.inactive, .background] {
     pipDeadline: service.manualPiPDeadline, now: DispatchQueue.main.now),
     "manual request allows bounded background startup when preference is off")
 }
-do {
-  let service = fresh(); service.repair(); let old = service.request()
-  DispatchQueue.main.advance(5)
-  check(service.pip == nil && !service.busy && service.retiringPiP.isEmpty,
-        "never-issued preparation timeout releases immediately and unblocks button")
-  check(old.delegate == nil && service.notices.isEmpty && !service.lastDiagnostic.isEmpty, "timeout is diagnostic-only; healthy playback has no popup")
-  let next = service.request(ready: true); DispatchQueue.main.advance()
-  old.isPictureInPicturePossible = true; service.terminal(old)
-  check(next.starts == 1 && service.pip === next, "old KVO/terminal cannot affect new request")
-}
-do {
-  let service = fresh(); service.repair(); let controller = service.request()
-  UIApplication.shared.applicationState = .background
-  // The bridge observes all starts for retirement before authorization check.
-  _ = service.rejectRetiringPiPStart(controller)
-  check(!service.rejectUnauthorizedAVPlayerPiPStart(controller),
-        "AVKit observed start for explicit request remains authorized before queued KVO")
-  check(service.presentationOwned && !service.pipStartIssued,
-        "observed-only start owns source before isActive or issued")
-  controller.isPictureInPicturePossible = true; DispatchQueue.main.advance()
-  check(controller.starts == 0, "observed start prevents duplicate explicit AVKit call")
-  controller.isPictureInPictureActive = true; service.didStartAVPlayerPiP(controller)
-  DispatchQueue.main.fireAll()
-  check(service.pip === controller && service.notices.isEmpty, "observed authorized startup stays active")
-  controller.isPictureInPictureActive = false; service.terminal(controller)
-  check(service.pip == nil && !service.busy, "observed authorized terminal releases")
-}
-for observed in [false, true] {
-  let service = fresh(); service.repair(); let controller = service.request()
-  // Simulate a suspended main queue: monotonic time passes without watchdog delivery.
-  DispatchQueue.main.now = 6
-  if observed {
-    _ = service.rejectRetiringPiPStart(controller)
-    check(!service.rejectUnauthorizedAVPlayerPiPStart(controller), "current observed start stays authorized despite delayed main queue")
-    check(service.retiringPiP.isEmpty, "clock expiry alone is not a new cancellation intent")
-  } else {
-    controller.isPictureInPicturePossible = true; DispatchQueue.main.advance()
-    check(controller.starts == 0 && service.pip == nil, "expired queued KVO cannot issue start before watchdog")
-  }
-}
-for mutation in 0..<4 {
-  let service = fresh(); service.repair(); let controller = service.request()
-  controller.isPictureInPicturePossible = true // queue KVO before cancellation/mutation
+for mutation in 0..<3 {
+  let service = fresh(); let old = service.prepare()
+  let staleDelivery = old.changed!
+  old.isPictureInPicturePossible = true // queue readiness before cancellation
   switch mutation {
-  case 0: service.cancel()
-  case 1: service.generation += 1
-  case 2: service.player.currentItem = AVPlayerItem()
-  default: service.surface = PlayerSurface()
+  case 0: service.resign(); UIApplication.shared.applicationState = .background
+  case 1: service.loadLatest("b.mp4")
+  default: service.attachSurface(PlayerSurface())
   }
-  DispatchQueue.main.advance()
-  check(controller.starts == 0 && service.pip == nil && !service.busy,
-        "cancel/generation/item/layer supersession invalidates queued readiness")
+  staleDelivery(); DispatchQueue.main.advance()
+  check(old.starts == 0 && old.delegate == nil && !service.busy
+        && service.avPlayerPiPRequest == nil && !service.avPlayerPiPAuthorized,
+        "stale idle readiness after Home/file/surface replacement cannot start or authorize")
   check(service.retiringPiP.isEmpty, "unissued cancellation never waits for impossible didStop")
 }
 do {
-  let service = fresh(); service.repair(); _ = service.request()
+  let service = fresh(); let old = service.prepare()
+  _ = service.rejectRetiringPiPStart(old)
+  service.resign()
+  check(service.pip === old && service.presentationOwned,
+        "observed-only controller is not treated as idle during resign")
+  check(service.rejectUnauthorizedAVPlayerPiPStart(old), "unsolicited observed start is rejected")
+  check(service.retiringPiP.count == 1 && service.surface?.videoLayer.player === service.player,
+        "unsolicited start uses existing terminal-safe retirement without video detachment")
+  service.terminal(old)
+  check(service.retiringPiP.isEmpty && service.pip !== old, "unsolicited terminal safely allows idle preparation")
+}
+do {
+  let service = fresh(); _ = service.prepare()
   service.failPlayback(); DispatchQueue.main.fireAll()
   check(service.pip == nil && !service.busy && service.notices.isEmpty,
-        "playback failure cancels preparation and stale timeout")
+        "playback failure cancels idle preparation without stale timeout or popup")
 }
 do {
   let service = fresh(); service.repair(); let old = service.request(ready: true)
@@ -606,8 +729,8 @@ do {
   check(service.retiringPiP.count == 1 && service.pip == nil, "issued inactive start awaits terminal")
   service.repair(); check(service.pip == nil && service.pipCreations == 1, "retirement prevents replacement controller")
   service.terminal(old)
-  check(service.retiringPiP.isEmpty && service.pip == nil && !service.busy,
-        "terminal restores only layer, never prebuilt controller")
+  check(service.retiringPiP.isEmpty && service.pip !== old && service.pip != nil && !service.busy,
+        "terminal releases old owner before foreground idle preparation")
   DispatchQueue.main.fireAll(); check(service.errorMessage.isEmpty, "old timer cannot fail terminal")
 }
 do {
@@ -615,7 +738,7 @@ do {
   DispatchQueue.main.advance()
   old.onStop = { [weak service, weak old] in if let old { service?.terminal(old) } }
   service.discard()
-  check(service.retiringPiP.isEmpty && service.pip == nil, "synchronous didStop clears without reprepare")
+  check(service.retiringPiP.isEmpty && service.pip !== old && !service.busy, "synchronous didStop clears safely before idle preparation")
 }
 do {
   let service = fresh(); service.repair(); let old = service.request(ready: true)
@@ -629,7 +752,7 @@ do {
         "unconfirmed PiP stop preserves healthy media instead of a global playback fault")
   check(service.rejectRetiringPiPStart(old) && old.stops == 2, "late start rejected after timeout")
   service.terminal(old); service.repair()
-  check(service.pip == nil && service.loads == 0 && service.wantsPlayback,
+  check(service.pip !== old && !service.busy && service.loads == 0 && service.wantsPlayback,
         "late terminal keeps the original healthy player and latest playback intent")
 }
 do {
@@ -639,7 +762,7 @@ do {
   check(service.retiringPiP.count == 1 && service.surface?.videoLayer.player === service.player,
         "willStart observed identity retained without detaching source")
   service.terminal(old)
-  check(service.pip == nil && service.retiringPiP.isEmpty, "rejection terminal does not reprepare")
+  check(service.pip !== old && !service.busy && service.retiringPiP.isEmpty, "rejection terminal permits only idle preparation")
 }
 do {
   let service = fresh(); service.repair(); let old = service.request(ready: true); DispatchQueue.main.advance()
@@ -659,7 +782,7 @@ do {
   let service = fresh(); service.repair(); let old = service.request(ready: true); DispatchQueue.main.advance()
   service.loadLatest("b.mp4"); service.pause()
   service.terminal(old); service.repair()
-  check(service.loads == 1 && service.pip == nil && service.loadedAutoplay == [false],
+  check(service.loads == 1 && service.pip !== old && !service.busy && service.loadedAutoplay == [false],
         "new pause intent survives the replacement stop acknowledgement")
 }
 for issued in [false, true] {
@@ -1180,6 +1303,648 @@ do {
         "current ready identity mismatch ends recovery in a bounded paused failure")
   check(service.requestedSeeks.isEmpty && service.errorMessage == "media_playback_failed",
         "mismatched restoration cannot seek or silently start at zero")
+}
+// Idle PiP source-release regression scenarios execute the real idle method.
+for ready in [false, true] {
+  for backgroundEnabled in [false, true] {
+    let service = fresh(); service.background = backgroundEnabled
+    let controller = service.prepare(ready: ready)
+    let player = service.player; let item = player.currentItem
+    let layer = service.surface!.videoLayer
+    let staleKVO = controller.changed!
+    let previousLayerReads = controller.playerLayerReads
+    var setterRan = false
+    controller.onContentSourceClear = { [weak service, weak controller] in
+      guard let service, let controller else { return }
+      setterRan = true
+      check(service.pip == nil && service.pipPossibleObservation == nil
+            && controller.delegate == nil && controller.changed == nil,
+            "source setter runs only after current ownership, delegate and KVO are cleared")
+      check(controller.playerLayerReads == previousLayerReads,
+            "idle release never asks the deprecated controller playerLayer getter")
+      // Force both an already-captured KVO delivery and synchronous stale
+      // delegate diagnostics while the ContentSource setter is running.
+      staleKVO(); DispatchQueue.main.advance()
+      service.recordPiPDelegateEntry("source-clear probe", controller: controller)
+      service.recordAVPlayerPiPEvent("stale source-clear probe", controller: controller)
+      check(controller.playerLayerReads == previousLayerReads && service.pip == nil,
+            "setter-reentrant old callbacks cannot read a released layer or regain ownership")
+    }
+    service.resign()
+    check(setterRan && controller.contentSource == nil && controller.contentSourceClearCount == 1,
+          "unrequested idle Home explicitly clears the source exactly once")
+    check(controller.starts == 0 && controller.stops == 0 && service.retiringPiP.isEmpty,
+          "idle source release neither starts nor stops nor retires PiP")
+    check(service.player === player && player.currentItem === item
+          && service.surface?.videoLayer === layer && layer.player === player,
+          "source release preserves the exact player, item, surface and layer binding")
+    check(service.wantsPlayback && service.loads == 0 && service.requestedSeeks.isEmpty,
+          "idle source release cannot alter playback intent or timeline")
+    check(service.lifecycleEvents.contains { $0.contains("idle source clear before")
+          && $0.contains("contentSourcePresent=true") && $0.contains("sourceMatchedCurrentLayer=true") }
+          && service.lifecycleEvents.contains { $0.contains("sourceClear=after")
+          && $0.contains("contentSourcePresent=false") && $0.contains("sourceMatchedCurrentLayerBefore=true") },
+          "bounded diagnostics identify this controller's source before and after release")
+    service.resign()
+    check(controller.contentSourceClearCount == 1, "repeated Home cannot re-clear an unowned controller")
+    let replacement = service.prepare(ready: true)
+    staleKVO(); DispatchQueue.main.advance()
+    check(replacement !== controller && service.pip === replacement && replacement.contentSource != nil
+          && replacement.contentSourceClearCount == 0 && replacement.starts == 0,
+          "foreground return obtains a new prepared controller unaffected by old KVO")
+    try! service.startPiP(delegate: service.ownedDelegate)
+    check(replacement.starts == 1 && replacement.contentSourceClearCount == 0,
+          "the next explicit manual start still uses its intact prepared source")
+  }
+}
+for activationAfterGuard in [false, true] {
+  let service = fresh(); let controller = service.prepare(ready: true)
+  // The first read is the outer idle gate, the second belongs to generic
+  // discard, and the third (when not retired) is the added setter fence.
+  controller.activeReadSequence = activationAfterGuard ? [false, false, true] : [false, true]
+  service.resign()
+  check(controller.contentSourceClearCount == 0 && controller.contentSource != nil,
+        "system activation between idle sampling and clearing prevents source release")
+  check(controller.stops == (activationAfterGuard ? 0 : 1),
+        "R6 adds no stop beyond the unchanged generic-discard retirement decision")
+  check((service.retiringPiP[ObjectIdentifier(controller)] != nil) == !activationAfterGuard,
+        "post-discard fence preserves the original retirement ownership outcome")
+}
+
+// Each protection is exercised alone, including malformed-but-safe states.
+for protection in 0..<9 {
+  let service = fresh(); let controller = service.prepare(ready: true)
+  let observation = service.pipPossibleObservation
+  let source = controller.contentSource
+  switch protection {
+  case 0: service.avPlayerPiPAuthorized = true
+  case 1:
+    service.avPlayerPiPRequest = (UUID(), service.generation, service.player.currentItem!, service.surface!.videoLayer, nil)
+  case 2: service.pipStartIssued = true
+  case 3: service.observedPiPStarts.insert(ObjectIdentifier(controller))
+  case 4: controller.isPictureInPictureActive = true
+  case 5:
+    service.pendingReplacement = (UUID(), controller, false, true, false)
+  case 6:
+    let retired = AVPictureInPictureController(playerLayer: VideoLayer())!
+    service.retiringPiP[ObjectIdentifier(retired)] = (retired, nil, true)
+  case 7: service.mediaKit = ReviewEngine()
+  default: break // The last case enters the real production method off-main.
+  }
+  if protection == 8 {
+    let finished = DispatchSemaphore(value: 0)
+    let worker = Thread { service.resign(); finished.signal() }
+    worker.start(); finished.wait()
+    while !worker.isFinished { Thread.sleep(forTimeInterval: 0.001) }
+  } else { service.resign() }
+  check(service.pip === controller && service.pipPossibleObservation === observation
+        && controller.contentSource === source && controller.contentSourceClearCount == 0,
+        "every non-idle/thread/ownership fence preserves controller, observation and source")
+  check(controller.starts == 0 && controller.stops == 0,
+        "protected presentations receive no start or stop side effect")
+}
+do {
+  let service = fresh(); let controller = service.prepare(ready: true)
+  // An old restore's passive inline mirror is not ownership of this new idle controller.
+  service.pipPlaybackSession = (UUID(), ObjectIdentifier(AVPictureInPictureController(playerLayer: VideoLayer())!),
+    service.generation, UUID(), true, true)
+  service.resign()
+  check(controller.contentSourceClearCount == 1,
+        "a previous inline mirror must not block release of a newly prepared idle source")
+}
+do {
+  let service = fresh(); let controller = service.prepare(ready: true)
+  controller.contentSource!.playerLayer = nil
+  service.resign()
+  check(controller.contentSourceClearCount == 1 && service.lifecycleEvents.contains {
+    $0.contains("sourceClear=after") && $0.contains("sourceMatchedCurrentLayerBefore=false") },
+    "a missing source layer is never reported as matching another nil layer")
+}
+do {
+  let service = fresh(); let controller = service.prepare(ready: true)
+  service.discard()
+  check(controller.contentSourceClearCount == 0 && controller.contentSource != nil,
+        "generic discard outside the Home idle path is unchanged by the experiment")
+}
+
+// Prepared manual PiP regression scenarios exercise the restored sequence.
+for backgroundEnabled in [false, true] {
+  let service = fresh(); service.background = backgroundEnabled
+  let controller = service.prepare(ready: true)
+  let oldPlayer = service.player; let oldItem = oldPlayer.currentItem
+  DispatchQueue.main.advance(60)
+  check(controller.starts == 0 && !service.busy && service.available && !service.avPlayerPiPAuthorized,
+        "long-lived foreground preparation has no request timeout or authorization")
+  service.resign(); UIApplication.shared.applicationState = .background
+  service.enterBackground(enabled: backgroundEnabled)
+  DispatchQueue.main.advance(30)
+  check(service.pip == nil && controller.starts == 0 && controller.stops == 0
+        && service.retiringPiP.isEmpty && service.player === oldPlayer && oldPlayer.currentItem === oldItem
+        && service.surface?.videoLayer.player === oldPlayer,
+        "zero-click Home releases idle registration while preserving the original video graph")
+  check(service.wantsPlayback == backgroundEnabled,
+        "idle preparation does not override the user's background-audio preference")
+  UIApplication.shared.applicationState = .active; service.inBackground = false; service.repair()
+  check(service.pip !== controller && service.pip != nil && !service.busy,
+        "foreground return prepares again without a phantom request")
+}
+do {
+  let service = fresh(); let controller = service.prepare(ready: true)
+  var observationPresentAtCall = true
+  controller.onStart = { [weak service, weak controller] in
+    observationPresentAtCall = service?.pipPossibleObservation != nil || controller?.changed != nil
+  }
+  try! service.startPiP(delegate: service.ownedDelegate)
+  check(!observationPresentAtCall && service.pipPossibleObservation == nil && controller.starts == 1,
+        "button starts directly and consumes readiness observation before the call")
+  let deadline = service.avPlayerPiPRequest!.deadline; let timeout = service.pipActivationTimeout
+  controller.isPictureInPicturePossible = false; controller.isPictureInPicturePossible = true
+  DispatchQueue.main.advance()
+  check(!service.rejectRetiringPiPStart(controller) && !service.rejectUnauthorizedAVPlayerPiPStart(controller),
+        "explicit willStart remains authorized")
+  check(service.avPlayerPiPRequest!.deadline == deadline && service.pipActivationTimeout === timeout
+        && controller.starts == 1 && controller.stops == 0,
+        "late KVO/willStart cannot extend the watchdog or repeat AVKit start")
+  service.resign(); UIApplication.shared.applicationState = .background
+  service.reconcile()
+  check(service.pip === controller && service.avPlayerPiPAuthorized && service.retiringPiP.isEmpty,
+        "manual click followed by Home preserves request and output")
+  controller.isPictureInPictureActive = true; service.didStartAVPlayerPiP(controller)
+  UIApplication.shared.applicationState = .active; service.repair()
+  check(service.pip === controller && service.pipCreations == 1,
+        "return while PiP active never replaces its controller")
+}
+do {
+  let service = fresh(); let controller = service.prepare(ready: true)
+  // begin guard, requested diagnostic, then the final pre-start sample.
+  controller.possibleReadSequence = [true, true, false]
+  try! service.startPiP(delegate: service.ownedDelegate)
+  check(controller.possibleReadSequence.isEmpty && controller.starts == 0
+        && service.avPlayerPiPRequest == nil && !service.avPlayerPiPAuthorized && !service.busy,
+        "readiness lost between checks cannot leave an unbounded pending authorization")
+  check(service.pip === controller && service.pipPossibleObservation != nil
+        && service.pipActivationTimeout == nil && service.manualPiPSession == nil,
+        "lost readiness keeps idle KVO without creating a timeout or background permission")
+  controller.isPictureInPicturePossible = true; DispatchQueue.main.advance()
+  check(controller.starts == 0, "readiness recovery still requires another manual tap")
+  try! service.startPiP(delegate: service.ownedDelegate)
+  check(controller.starts == 1 && service.busy, "next ready tap starts the same prepared controller")
+}
+for cancelWithFailure in [false, true] {
+  let service = fresh(); let controller = service.request()
+  if cancelWithFailure { service.failPlayback() } else { service.cancel() }
+  check(service.pipPossibleObservation == nil && controller.changed == nil && service.retiringPiP.count == 1,
+        "failure/cancellation uses issued-controller terminal fencing")
+}
+do {
+  let service = fresh(); let old = service.prepare(); let staleDelivery = old.changed!
+  service.resign(); UIApplication.shared.applicationState = .active
+  let current = service.prepare(ready: true)
+  old.isPictureInPicturePossible = true; staleDelivery(); DispatchQueue.main.advance()
+  check(old.starts == 0 && current.starts == 0 && service.pip === current && service.avPlayerPiPRequest == nil,
+        "old idle KVO cannot start the replacement or create a request")
+  try! service.startPiP(delegate: service.ownedDelegate)
+  let requestID = service.avPlayerPiPRequest!.id; let timeout = service.pipActivationTimeout
+  staleDelivery(); DispatchQueue.main.advance()
+  check(service.avPlayerPiPRequest!.id == requestID && service.pipActivationTimeout === timeout
+        && current.starts == 1 && old.starts == 0,
+        "old queued KVO cannot mutate the new manual request")
+}
+do {
+  let service = fresh(); let staleRequest = UUID()
+  AVPictureInPictureController.onCreate = { [weak service] controller in
+    service?.avPlayerPiPTraceRequests = [(ObjectIdentifier(controller), staleRequest, -99)]
+  }
+  let controller = service.prepare(ready: true)
+  AVPictureInPictureController.onCreate = nil
+  check(service.avPlayerPiPTraceRequests.isEmpty,
+        "new preparation removes old trace at a reused controller address")
+  controller.isPictureInPictureActive = true
+  service.recordPiPDelegateEntry("willStart", controller: controller)
+  service.recordAVPlayerPiPEvent("unauthorized probe", controller: controller)
+  check(!service.lifecycleEvents.contains { $0.contains(staleRequest.uuidString) || $0.contains("requestGeneration=-99") },
+        "active-before-unauthorized callback cannot inherit an older request identity")
+  check(service.rejectUnauthorizedAVPlayerPiPStart(controller),
+        "trace cleanup never grants permission to the unsolicited active controller")
+}
+do {
+  let service = fresh(); service.mediaKit = ReviewEngine()
+  check(service.available, "MK video remains immediately available without AV preparation")
+  service.repair(); service.resign()
+  check(service.pip == nil && service.pipCreations == 0, "MK path never acquires an AV preparation")
+  try! service.startPiP(delegate: service.ownedDelegate, requestID: "manual-mk")
+  check(service.mediaKitPiPPreparing && service.manualPiPSession == service.generation,
+        "MK explicit asynchronous preparation and bounded authorization remain unchanged")
+}
+
+// PiP close and restore regression scenarios
+func acceptedAVPiP(_ service: PresentationReviewHost) -> AVPictureInPictureController {
+  let controller = service.request()
+  controller.isPictureInPictureActive = true
+  service.player.rate = 1; service.player.timeControlStatus = .playing
+  service.didStartAVPlayerPiP(controller)
+  return controller
+}
+func acceptedMKPiP(_ service: PresentationReviewHost) -> AVPictureInPictureController {
+  service.mediaKit = ReviewEngine()
+  let controller = AVPictureInPictureController(playerLayer: VideoLayer())!
+  let renderer = MediaKitPiPRenderer(controller); renderer.startIssued = true
+  service.mediaKitPiP = renderer; service.authorizeManualPiP(seconds: 8)
+  controller.isPictureInPictureActive = true; service.didStartMediaKitPiP(controller)
+  return controller
+}
+for mk in [false, true] {
+  for background in [false, true] {
+    let service = fresh(); service.background = background; service.position = 37
+    let controller = mk ? acceptedMKPiP(service) : acceptedAVPiP(service)
+    service.pendingEndAction = true
+    service.willStopPiP(controller)
+    controller.isPictureInPictureActive = false; service.terminal(controller)
+    check(!service.wantsPlayback && !service.pendingEndAction && service.position == 37,
+          "current accepted PiP close pauses and preserves position in both engines/settings")
+    check(service.audioRecoveryCalls == 0 && service.requestedSeeks.isEmpty && service.loads == 0,
+          "close cannot seek, reload, or auto-resume")
+    if mk { service.mediaKit!.outputRestoreCompletions[0](true); DispatchQueue.main.advance() }
+    check(service.audioRecoveryCalls == 0, "late inline output-ready cannot revive closed playback")
+  }
+  for playing in [false, true] {
+    for stopFirst in [false, true] {
+      let service = fresh(); let controller = mk ? acceptedMKPiP(service) : acceptedAVPiP(service)
+      if !playing { service.pause() }
+      let token = UUID()
+      if stopFirst { service.willStopPiP(controller) }
+      check(service.beginPiPRestore(controller, token: token), "owned restore accepted")
+      if !stopFirst { service.willStopPiP(controller) }
+      service.completePiPRestore(controller, token: token, restored: true)
+      service.player.pause() // AVKit technical pause while its stop animation ends.
+      if !mk { service.player.rate = playing ? 1 : 0 } // Native restore before didStop.
+      controller.isPictureInPictureActive = false; service.terminal(controller)
+      if mk { service.mediaKit!.outputRestoreCompletions[0](true); DispatchQueue.main.advance() }
+      check(service.wantsPlayback == playing && service.audioRecoveryCalls == (mk && playing ? 1 : 0),
+            "restore preserves latest playing/paused intent for both callback orders and engines")
+    }
+  }
+  let service = fresh(); let controller = mk ? acceptedMKPiP(service) : acceptedAVPiP(service)
+  let oldToken = UUID(); let newToken = UUID()
+  check(service.beginPiPRestore(controller, token: oldToken), "first restore accepted")
+  service.completePiPRestore(controller, token: oldToken, restored: false)
+  check(service.pipPlaybackSession?.restoreToken == nil, "failed or cancelled restore cannot mark later X as restoration")
+  check(service.beginPiPRestore(controller, token: newToken), "second restore accepted")
+  service.completePiPRestore(controller, token: oldToken, restored: false)
+  check(service.pipPlaybackSession?.restoreToken == newToken, "late old restore result cannot cancel newer restore")
+  service.completePiPRestore(controller, token: newToken, restored: false)
+  service.willStopPiP(controller); controller.isPictureInPictureActive = false; service.terminal(controller)
+  check(!service.wantsPlayback, "X after failed/expired restore pauses")
+}
+for reason in [AVPlayer.RateDidChangeReason.appBackgrounded, .audioSessionInterrupted, .setRateFailed] {
+  let service = fresh(); _ = acceptedAVPiP(service)
+  service.player.pause(); service.player.timeControlStatus = .paused
+  service.queuePiPTransport(reason: reason)()
+  check(service.wantsPlayback, "background/interruption/rate-failure notification is not a user pause")
+}
+for gate in 0..<12 {
+  let service = fresh(); let controller = acceptedAVPiP(service)
+  let event = service.queuePiPTransport()
+  service.player.pause(); service.player.timeControlStatus = .paused
+  switch gate {
+  case 0: service.avPlayerTransportMutationDepth = 1
+  case 1: service.isSeeking = true
+  case 2: service.scrubbing = true
+  case 3: service.interrupted = true
+  case 4: service.loading = true
+  case 5: service.audioRecoveryPending = true
+  case 6: service.controlBusy = true
+  case 7: service.trackSelection = "audio"
+  case 8: service.replayOperation = 9
+  case 9: service.position = service.duration
+  case 10: service.willStopPiP(controller)
+  default: _ = service.beginPiPRestore(controller, token: UUID())
+  }
+  event()
+  check(service.wantsPlayback == (gate < 10), "technical app pauses are excluded while AVKit transitions only mirror actual state")
+  check(service.audioRecoveryCalls == 0 && service.pauses == 0,
+        "transport mirror never calls engine play/pause, including pre-callback technical pauses")
+}
+do {
+  let service = fresh(); let controller = acceptedAVPiP(service)
+  let event = service.queuePiPTransport()
+  service.player.pause(); service.player.timeControlStatus = .paused; event()
+  check(!service.wantsPlayback, "AV PiP pause updates the user's playback intent")
+  let token = UUID(); _ = service.beginPiPRestore(controller, token: token)
+  service.completePiPRestore(controller, token: token, restored: true)
+  controller.isPictureInPictureActive = false; service.terminal(controller)
+  check(!service.wantsPlayback && service.audioRecoveryCalls == 0, "restoring system-paused AV PiP stays paused")
+}
+do {
+  let service = fresh(); let controller = acceptedAVPiP(service)
+  service.player.pause(); service.player.timeControlStatus = .paused; service.queuePiPTransport()()
+  service.player.rate = 1; service.player.timeControlStatus = .waitingToPlayAtSpecifiedRate
+  service.queuePiPTransport()()
+  check(service.wantsPlayback, "waiting transport retains its requested nonzero play rate")
+  service.player.rate = 0; service.queuePiPTransport()()
+  check(!service.wantsPlayback, "explicit rate-zero pause wins even before waiting status changes")
+  service.play()
+  let token = UUID(); _ = service.beginPiPRestore(controller, token: token)
+  service.pause(); service.player.pause()
+  controller.isPictureInPictureActive = false; service.terminal(controller)
+  check(!service.wantsPlayback, "a newer explicit pause during restore wins")
+}
+for newerPlaying in [false, true] {
+  let service = fresh(); _ = acceptedAVPiP(service)
+  let oldNotification = service.queuePiPTransport()
+  if newerPlaying { service.pause(); service.play() } else { service.pause() }
+  oldNotification()
+  check(service.wantsPlayback == newerPlaying, "queued same-session notification samples latest transport and cannot replay an older intent")
+}
+for mutation in 0..<4 {
+  let service = fresh(); let controller = acceptedAVPiP(service)
+  let stale = service.queuePiPTransport()
+  switch mutation {
+  case 0: service.generation += 1
+  case 1: service.installIdentity()
+  case 2: service.pip = AVPictureInPictureController(playerLayer: service.surface!.videoLayer)
+  default:
+    controller.isPictureInPictureActive = false; service.terminal(controller)
+    service.play(); _ = acceptedAVPiP(service)
+  }
+  service.player.pause(); service.player.timeControlStatus = .paused
+  service.wantsPlayback = true; stale()
+  check(service.wantsPlayback, "captured generation/item/controller/session fences reject delayed old transport callbacks")
+}
+for failed in [false, true] {
+  let service = fresh(); let controller = service.request()
+  if failed { service.finishAVPlayerPiP(controller, terminal: .failedToStart) }
+  else { service.finishAVPlayerPiP(controller, terminal: .didStop) }
+  check(service.wantsPlayback, "unaccepted start terminal is not an X close")
+}
+do {
+  let service = fresh(); let controller = acceptedAVPiP(service)
+  service.loadLatest("new.mp4", autoplay: true)
+  controller.isPictureInPictureActive = false; service.terminal(controller)
+  check(service.wantsPlayback && service.loadedPaths == ["new.mp4"], "accepted old PiP replacement never pauses the new media")
+}
+
+for reasonValue: Any in [AVPlayer.RateDidChangeReason.setRateCalled.rawValue,
+                         AVPlayer.RateDidChangeReason.setRateCalled] {
+  let service = fresh(); _ = acceptedAVPiP(service)
+  service.player.pause(); service.player.timeControlStatus = .paused
+  NotificationCenter.default.post(name: AVPlayer.rateDidChangeNotification, object: service.player,
+    userInfo: [AVPlayer.rateDidChangeReasonKey: reasonValue])
+  check(!service.wantsPlayback, "registered production notification adapter accepts native typed and Objective-C string reasons")
+}
+
+for initiallyPlaying in [false, true] {
+  let service = fresh()
+  var controller: AVPictureInPictureController? = acceptedAVPiP(service)
+  weak var releasedController = controller
+  let mirror = service.queuePiPTransport()
+  if !initiallyPlaying { service.player.pause(); mirror() }
+  // Deliberately model AVKit's technical pause before ANY stop/restore callback.
+  service.player.pause(); mirror()
+  check(!service.wantsPlayback && service.audioRecoveryCalls == 0 && service.pauses == 0,
+        "early AVKit technical pause only mirrors state, never commands playback")
+  let token = UUID(); _ = service.beginPiPRestore(controller!, token: token)
+  service.completePiPRestore(controller!, token: token, restored: true)
+  controller!.isPictureInPictureActive = false; service.terminal(controller!)
+  controller = nil
+  // In production the old controller can deallocate here; the mirror owns no strong reference.
+  check(releasedController == nil, "inline follow does not retain a terminal AVKit controller")
+  check(service.audioRecoveryCalls == 0 && service.pauses == 0,
+        "normal restore terminal never forces pause or resume")
+  service.player.rate = initiallyPlaying ? 1 : 0 // AVKit completes native transport restoration.
+  mirror()
+  check(service.wantsPlayback == initiallyPlaying && service.player.rate == (initiallyPlaying ? 1 : 0),
+        "late native restore is reflected after controller release without influencing it")
+  service.pause(); service.player.rate = 1; mirror()
+  check(!service.wantsPlayback, "new explicit app pause ends inline follow and rejects delayed old mirror")
+}
+
+do {
+  let service = fresh(); let controller = acceptedAVPiP(service)
+  let oldMirror = service.queuePiPTransport(); let token = UUID()
+  _ = service.beginPiPRestore(controller, token: token)
+  controller.isPictureInPictureActive = false; service.terminal(controller)
+  check(service.pipPlaybackSession?.inline == true, "normal restore owns an item-scoped inline mirror")
+  service.loadLatest("replacement.mp4")
+  check(service.pipPlaybackSession == nil && service.pipTransportObservation == nil,
+        "media replacement explicitly releases the old inline mirror and observer")
+  oldMirror()
+  check(service.wantsPlayback && service.loadedPaths == ["replacement.mp4"],
+        "released mirror cannot change new media playback")
+}
+
+// Real delegate method bodies with deterministic bridge/UI callbacks.
+do {
+  let service = fresh(); let controller = acceptedAVPiP(service)
+  let bridge = PiPBridgeReviewHost(service)
+  var completed: [Bool] = []
+  bridge.pictureInPictureController(controller, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler: { completed.append($0) })
+  let currentToken = bridge.pipRestoreToken
+  let staleController = AVPictureInPictureController(playerLayer: VideoLayer())!
+  var staleCompleted: [Bool] = []
+  bridge.pictureInPictureController(staleController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler: { staleCompleted.append($0) })
+  check(staleCompleted == [false] && completed.isEmpty && bridge.pipRestoreToken == currentToken,
+        "late stale restore rejects only its own completion and cannot cancel current UI restoration")
+  bridge.acknowledgeRestore(true)
+  check(completed == [true], "valid restored UI completes exactly once")
+  bridge.pictureInPictureControllerWillStopPictureInPicture(controller)
+  controller.isPictureInPictureActive = false
+  bridge.pictureInPictureControllerDidStopPictureInPicture(controller)
+  check(service.wantsPlayback && service.audioRecoveryCalls == 0,
+        "actual delegate restore/didStop leaves native transport untouched")
+  DispatchQueue.main.advance(5)
+  check(completed == [true], "old restore timeout cannot complete an already-acknowledged request")
+}
+for failure in 0..<3 {
+  let service = fresh(); let controller = acceptedAVPiP(service)
+  let bridge = PiPBridgeReviewHost(service); var completed: [Bool] = []
+  if failure == 0 { bridge.sink = nil }
+  bridge.pictureInPictureController(controller, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler: { completed.append($0) })
+  if failure == 1 { DispatchQueue.main.advance(5) }
+  if failure == 2 { bridge.acknowledgeRestore(false) }
+  check(completed == [false] && service.pipPlaybackSession?.restoreToken == nil,
+        "missing UI, timeout, and navigation cancellation clear matching restore intent")
+  controller.isPictureInPictureActive = false
+  bridge.pictureInPictureControllerDidStopPictureInPicture(controller)
+  check(!service.wantsPlayback, "actual delegate X after failed restore does not resume")
+}
+do {
+  let service = fresh(); let controller = acceptedMKPiP(service)
+  let bridge = PiPBridgeReviewHost(service)
+  controller.isPictureInPictureActive = false
+  bridge.pictureInPictureController(controller, failedToStartPictureInPictureWithError: LibraryFailure.app("review failure"))
+  check(service.wantsPlayback, "typed sample-buffer failedToStart cannot be mistaken for a user close")
+}
+do {
+  let service = fresh(); _ = acceptedAVPiP(service)
+  let delayedInternal = service.queuePiPTransport()
+  service.isSeeking = true; service.player.pause()
+  delayedInternal(); check(service.wantsPlayback, "queued internal seek pause does not erase intent")
+  service.isSeeking = false; service.play()
+  delayedInternal(); check(service.wantsPlayback, "late internal rate notification observes resumed output, not its obsolete pause")
+}
+
+// PiP diagnostics regression scenarios execute production logging methods.
+// Real background entry; our deterministic main scheduler is drained only
+// after this worker finishes, so the test has no concurrent array access.
+func offMainDiagnostic(_ work: @escaping () -> Void) {
+  let finished = DispatchSemaphore(value: 0)
+  let worker = Thread { work(); finished.signal() }
+  worker.start(); finished.wait()
+  while !worker.isFinished { Thread.sleep(forTimeInterval: 0.001) }
+}
+do {
+  let service = fresh()
+  let controller = AVPictureInPictureController(playerLayer: VideoLayer())!
+  let key = ObjectIdentifier(controller)
+  service.pip = controller
+  service.avPlayerPiPTraceRequests = [(key, UUID(), service.generation)]
+  offMainDiagnostic { [weak service, weak controller] in
+    guard let service, let controller else { return }
+    service.recordPiPDelegateEntry("willStart", controller: controller)
+    service.recordAVPlayerPiPEvent("delegate willStart", controller: controller, includeSource: true)
+  }
+  check(service.lifecycleEvents.isEmpty && controller.playerLayerReads == 0,
+        "off-main raw/detailed diagnostics do not read playerLayer or mutate log arrays")
+  check(DispatchQueue.main.scheduled.count == 1 && controller.starts == 0 && controller.stops == 0,
+        "only raw diagnostic recording is queued; no PiP control work is added")
+  service.pip = nil
+  service.retiringPiP[key] = (controller, nil, true)
+  DispatchQueue.main.now = 4
+  DispatchQueue.main.advance()
+  let line = service.lifecycleEvents.last!
+  check(line.contains("originMain=false") && line.contains("main=true") && line.contains("entryUptime=0.000"),
+        "deferred recording preserves the real off-main origin and earlier entry time")
+  check(line.contains("owner=retiring") && line.contains("ownershipSample=deferred")
+        && line.contains("avDetails=skippedOffMain"),
+        "changed ownership is explicitly observed at deferred recording time")
+  check(controller.playerLayerReads == 0, "deferred raw entry still never reads playerLayer")
+}
+do {
+  let service = fresh()
+  var controller: AVPictureInPictureController? = AVPictureInPictureController(playerLayer: VideoLayer())!
+  weak var weakController = controller
+  let key = ObjectIdentifier(controller!)
+  service.avPlayerPiPTraceRequests = [(key, UUID(), service.generation)]
+  offMainDiagnostic { [weak service, weak controller] in
+    if let service, let controller { service.recordPiPDelegateEntry("didStop", controller: controller) }
+  }
+  controller = nil
+  check(weakController == nil, "queued raw diagnostic does not extend controller lifetime")
+  DispatchQueue.main.advance()
+  let line = service.lifecycleEvents.last!
+  check(line.contains("controller=\(key)") && line.contains("owner=unknown") && line.contains("objectAlive=false")
+        && line.contains("request=unknown"),
+        "released controller retains its arrival ID without inheriting historical ownership")
+}
+do {
+  var service: PresentationReviewHost? = fresh()
+  weak var weakService = service
+  let controller = AVPictureInPictureController(playerLayer: VideoLayer())!
+  offMainDiagnostic { [weak service, weak controller] in
+    if let service, let controller { service.recordPiPDelegateEntry("restore", controller: controller) }
+  }
+  service = nil
+  check(weakService == nil, "queued raw diagnostic does not extend service lifetime")
+  DispatchQueue.main.advance()
+  check(DispatchQueue.main.scheduled.isEmpty, "released service safely drops its deferred diagnostic")
+}
+do {
+  let service = fresh(); let controller = service.prepare(ready: true)
+  controller.onStart = { [weak service, weak controller] in
+    guard let service, let controller else { return }
+    check(service.pipStartIssued, "issued flag is set before a synchronous callback")
+    service.recordPiPDelegateEntry("didStop", controller: controller)
+    service.terminal(controller)
+    service.generation += 1
+    service.surface = PlayerSurface()
+    service.avPlayerPiPTraceRequests.removeAll()
+    DispatchQueue.main.now += 0.025
+  }
+  try! service.startPiP(delegate: service.ownedDelegate)
+  DispatchQueue.main.advance()
+  let events = service.lifecycleEvents
+  let before = events.first { $0.contains("AVPiP start call before ") }!
+  let after = events.first { $0.contains("AVPiP start call returned ") }!
+  let beforeTrace = before.components(separatedBy: "AVPiP start call before ")[1].components(separatedBy: " main=")[0]
+  let afterTrace = after.components(separatedBy: "AVPiP start call returned ")[1].components(separatedBy: " main=")[0]
+  check(beforeTrace == afterTrace, "paired immutable identities survive synchronous release and generation change")
+  check(after.contains("main=true elapsedMs=25.000"), "return log includes measured call duration and main thread")
+  check(events.firstIndex(of: before)! < events.firstIndex(where: { $0.contains("PiP delegate entry didStop") })!
+        && events.firstIndex(where: { $0.contains("PiP delegate entry didStop") })! < events.firstIndex(of: after)!,
+        "raw callback is ordered between call entry and return")
+  check(events.firstIndex(where: { $0.contains("AVPiP start issued") })! < events.firstIndex(of: before)!,
+        "issued diagnostic remains before AVKit start")
+  check(events.contains { $0.contains("source after start") && $0.contains("surface=nil") },
+        "post-callback snapshot does not misattribute an old layer to a replacement surface")
+  check(controller.starts == 1 && controller.stops == 0 && service.pip !== controller,
+        "diagnostics neither repeat start nor manufacture a stop after synchronous terminal")
+}
+for ownership in ["currentAV", "currentMK", "retiringAV", "retiringMK", "unknown"] {
+  let service = fresh()
+  let controller = AVPictureInPictureController(playerLayer: VideoLayer())!
+  let key = ObjectIdentifier(controller)
+  // A historical identity alone must never classify unknown or MK as AV.
+  service.avPlayerPiPTraceRequests = [(key, UUID(), service.generation)]
+  switch ownership {
+  case "currentAV": service.pip = controller
+  case "currentMK": service.mediaKitPiP = MediaKitPiPRenderer(controller)
+  case "retiringAV": service.retiringPiP[key] = (controller, nil, true)
+  case "retiringMK": service.retiringPiP[key] = (controller, MediaKitPiPRenderer(controller), true)
+  default: break
+  }
+  for event in ["willStart", "didStart", "failedToStart", "willStop", "didStop", "restore"] {
+    let oldCount = service.lifecycleEvents.count
+    service.recordPiPDelegateEntry(event, controller: controller,
+      error: NSError(domain: "AVKitErrorDomain", code: -1,
+        userInfo: [NSLocalizedDescriptionKey: "PRIVATE_MEDIA_FILENAME"]))
+    check(service.lifecycleEvents.count == oldCount + 1, "every delegate entry is logged before filtering")
+    let line = service.lifecycleEvents.last!
+    let expectedOwner = ownership.hasPrefix("current") ? "current" : ownership.hasPrefix("retiring") ? "retiring" : "unknown"
+    check(line.contains("owner=\(expectedOwner)") && line.contains("controller=\(key)") && line.contains("main=true"),
+          "delegate entry identifies live owner, controller and thread")
+    check(!line.contains("PRIVATE_MEDIA_FILENAME"), "raw callback diagnostic omits localized private error text")
+    check(controller.playerLayerReads == 0, "raw callback diagnostic never accesses playerLayer")
+  }
+  if ownership == "unknown" || ownership.hasSuffix("MK") {
+    service.recordAVPlayerPiPEvent("filtered probe", controller: controller, includeSource: true)
+    check(controller.playerLayerReads == 0, "detailed AV diagnostic also excludes unknown and MK controllers")
+    check(service.lifecycleEvents.last!.contains("request=unknown"), "unknown and MK cannot inherit AV request history")
+  }
+}
+do {
+  let service = fresh(); service.repair()
+  let source = service.surface!
+  let parent = UIView(); parent.isHidden = true; parent.clipsToBounds = true
+  parent.bounds = CGRect(x: 0, y: 0, width: 100, height: 80)
+  source.superview = parent
+  let snapshot = service.sourceSnapshot(source.videoLayer)
+  for field in ["sourceLayer=", "sourcePlayer=", "sourceItem=", "layerBounds=", "layerFrame=", "videoRect=",
+                "layerHidden=", "layerOpacity=", "surfaceHidden=", "surfaceAlpha=", "window=", "sceneState=",
+                "audioCategory=", "audioMode=", "audioOptions=", "audioInputs=", "audioOutputs="] {
+    check(snapshot.contains(field), "source snapshot contains \(field)")
+  }
+  check(snapshot.contains("clippedIntersection=[0.0,0.0,100.0,80.0]") && snapshot.contains("visibleIntersection=null"),
+        "snapshot reports ancestor clipping and hidden visibility")
+  check(!snapshot.contains("PRIVATE_DEVICE_NAME") && !snapshot.contains(service.currentPath!),
+        "snapshot contains neither route device names nor media filenames")
+  var ancestor = parent
+  for _ in 0..<10 { let next = UIView(); ancestor.superview = next; ancestor = next }
+  let bounded = service.sourceSnapshot(source.videoLayer)
+  check(bounded.count <= 2800 && bounded.contains("ancestorsTruncated=true") && bounded.contains("visibleIntersection=unknown"),
+        "deep ancestry has bounded work and explicitly unknown visibility")
+  let disconnected = service.sourceSnapshot(VideoLayer())
+  check(disconnected.contains("surface=nil") && !disconnected.contains("visibleIntersection="),
+        "unowned layer does not reuse the current surface's geometry")
+  check(service.sourceSnapshot(nil).contains("sourceSnapshot=released"), "released weak source remains explicit")
+}
+do {
+  let service = fresh(); _ = service.request()
+  DispatchQueue.main.advance(8)
+  check(service.lifecycleEvents.contains { $0.contains("AVPiP requested") && $0.contains("audioCategory=") },
+        "manual request includes source and audio snapshot")
+  check(service.lifecycleEvents.contains { $0.contains("phase watchdog fired") && $0.contains("sourceLayer=") && $0.contains("audioCategory=") },
+        "activation timeout includes a source snapshot before cleanup")
 }
 print("Presentation production policy/method harness: \(assertions) assertions passed")
 print("Scope: extracted Swift decisions and deterministic callbacks; Apple SDK / device rendering not exercised.")
