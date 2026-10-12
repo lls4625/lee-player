@@ -168,11 +168,15 @@ class MediaKitSnapshotStamp {
     this._session,
     this.positionVersion,
     this.snapshotSequence,
+    this.positionSettled,
+    this._endEpoch,
   );
 
   final int _session;
   final int positionVersion;
   final int snapshotSequence;
+  final bool positionSettled;
+  final int _endEpoch;
 }
 
 /// Fences the whole state payload, including EOF and failure, across seeks.
@@ -185,6 +189,8 @@ class MediaKitSnapshotFence {
   int _positionVersion = 0;
   int _snapshotSequence = 0;
   int _lastPublishedSequence = 0;
+  bool _positionSettled = true;
+  int _endEpoch = 0;
 
   int get positionVersion => _positionVersion;
 
@@ -192,6 +198,7 @@ class MediaKitSnapshotFence {
     if (positionVersion < 0) throw ArgumentError.value(positionVersion);
     _session++;
     _positionVersion = positionVersion;
+    _positionSettled = true;
   }
 
   void invalidateSession() => _session++;
@@ -200,6 +207,7 @@ class MediaKitSnapshotFence {
   bool recordPositionVersion(int positionVersion) {
     if (positionVersion < _positionVersion) return false;
     _positionVersion = positionVersion;
+    _positionSettled = false;
     return true;
   }
 
@@ -207,10 +215,38 @@ class MediaKitSnapshotFence {
     _session,
     _positionVersion,
     ++_snapshotSequence,
+    _positionSettled,
+    _endEpoch,
   );
 
   bool isCurrent(MediaKitSnapshotStamp stamp) =>
       stamp._session == _session && stamp.positionVersion == _positionVersion;
+
+  /// A seek is pending from receipt, including its time waiting in the command
+  /// queue. Only the latest, observed settled seek can restore EOF authority.
+  bool settlePosition(MediaKitSnapshotStamp origin) {
+    if (!isCurrent(origin) || origin._endEpoch != _endEpoch) return false;
+    _positionSettled = true;
+    return true;
+  }
+
+  /// A late intent repair may issue another native seek in the same version.
+  /// Invalidate reads begun before that repair without falsely acknowledging
+  /// an unconfirmed primary seek or changing its receipt identity.
+  void invalidateEndEvidence() {
+    _endEpoch++;
+    _positionSettled = false;
+  }
+
+  /// Completion must come from libmpv in this settled playback pass. Cached
+  /// PlayerState.completed can outlive a seek and is never terminal evidence.
+  bool confirmsEnd(MediaKitSnapshotStamp stamp, {
+    required String? eof,
+    required String? seeking,
+  }) => isCurrent(stamp) && stamp._endEpoch == _endEpoch &&
+      stamp.positionSettled && _positionSettled &&
+      (eof == 'yes' || eof == 'true') &&
+      (seeking == 'no' || seeking == 'false');
 
   /// A current error is a new state transition, rather than a delayed property
   /// snapshot. Give it a fresh sequence even if newer reads already published.

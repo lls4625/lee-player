@@ -470,9 +470,17 @@ void main() {
     );
     expect(read, isNot(contains('mpv_wait_event')));
     final app = File('lib/media_kit_playback.dart').readAsStringSync();
-    expect('controlRead: true'.allMatches(app).length, 2);
-    expect(app, contains("_property(native, 'seeking', controlRead: true)"));
-    expect(app, contains("_property(native, 'time-pos', controlRead: true)"));
+    final seek = app.substring(app.indexOf('Future<bool> _seek('),
+        app.indexOf('void _scheduleLatestPlayIntent('));
+    final repair = app.substring(app.indexOf('void _scheduleLatestSeekIntent('),
+        app.indexOf('Future<void> _heartbeat('));
+    for (final positioningPath in [seek, repair]) {
+      expect('controlRead: true'.allMatches(positioningPath).length, 2);
+      expect("_property(native, 'seeking', controlRead: true)".allMatches(positioningPath).length, 1);
+      expect("_property(native, 'time-pos', controlRead: true)".allMatches(positioningPath).length, 1);
+    }
+    expect('controlRead: true'.allMatches(app).length, 4,
+        reason: 'only primary and late-repair seek confirmation use the reserve');
     expect(app, isNot(contains('.observeProperty(')));
     // The app catches only actual UNAVAILABLE (-10), not unsupported/busy.
     expect(

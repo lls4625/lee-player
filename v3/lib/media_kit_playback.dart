@@ -619,6 +619,7 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
   Future<bool> _seek(Player player, String id, double target, int intent,
       MediaKitCommandPermit permit, {String requestId = ''}) async {
     final measurements = _measurements;
+    var origin = _snapshots.capture();
     final total = Stopwatch()..start();
     var pauseUs = -1, commandUs = -1, confirmUs = -1, refreshUs = -1;
     var phaseStart = 0, confirmStart = -1;
@@ -631,7 +632,11 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
       finally { pauseUs = total.elapsedMicroseconds; }
       phaseStart = total.elapsedMicroseconds;
       if (!_allows(permit, id, player) || !_seekIntent.isLatest(intent)) return false;
-      try { await native.command(['seek', target.toStringAsFixed(6), 'absolute+exact']); }
+      // media_kit pins hr-seek=yes: its public absolute seek remains precise
+      // and also clears completed, so a later play does not jump back to zero.
+      // Our intent queue owns serialization; do not hold the plugin-wide lock
+      // across a delayed seek receipt and block priority pause/disposal.
+      try { await native.seek(Duration(microseconds: (target * 1000000).round()), synchronized: false); }
       finally { commandUs = total.elapsedMicroseconds - phaseStart; }
       if (!_allows(permit, id, player) || !_seekIntent.isLatest(intent)) {
         _scheduleLatestSeekIntent(player, id);
@@ -649,6 +654,14 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
         if (idle && position != null && position.isFinite && (position - target).abs() <= 0.35) {
           settled++;
           if (settled >= 2) {
+            if (!_allows(permit, id, player) || !_seekIntent.isLatest(intent)) return false;
+            if (!_snapshots.settlePosition(origin)) {
+              // A same-version late repair is another native mutation. Require
+              // two new observations after it, rather than trusting old reads.
+              origin = _snapshots.capture();
+              settled = 0;
+              continue;
+            }
             _log('seek settled target=${target.toStringAsFixed(3)} position=${position.toStringAsFixed(3)} elapsed=${elapsed.elapsedMilliseconds}ms');
             confirmUs = elapsed.elapsedMicroseconds;
             phaseStart = total.elapsedMicroseconds;
@@ -750,9 +763,30 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
           final version = _seekIntent.version;
           final target = _seekIntent.value;
           if (target == null || !target.isFinite || target < 0) break;
-          final operation = native.command([
-            'seek', target.toStringAsFixed(6), 'absolute+exact',
-          ]);
+          _snapshots.invalidateEndEvidence();
+          final origin = _snapshots.capture();
+          final permit = MediaKitCommandPermit();
+          bool current() => permit.isValid && _sameSession(player, id) &&
+              generation == _repairGeneration && _seekIntent.isLatest(version);
+          final operation = () async {
+            await native.seek(Duration(microseconds: (target * 1000000).round()), synchronized: false);
+            final elapsed = Stopwatch()..start();
+            var stable = 0;
+            while (current() && elapsed.elapsed < const Duration(seconds: 1)) {
+              await Future<void>.delayed(const Duration(milliseconds: 25));
+              if (!current()) return;
+              final seeking = await _property(native, 'seeking', controlRead: true);
+              final position = double.tryParse(await _property(native, 'time-pos', controlRead: true) ?? '');
+              if (!current()) return;
+              if ((seeking == 'no' || seeking == 'false') && position != null &&
+                  position.isFinite && (position - target).abs() <= 0.35) {
+                if (++stable >= 2) {
+                  _snapshots.settlePosition(origin);
+                  return;
+                }
+              } else { stable = 0; }
+            }
+          }();
           final weakPlayer = WeakReference<Player>(player);
           unawaited(operation.then<void>((_) {
             final latePlayer = weakPlayer.target;
@@ -765,7 +799,8 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
           try {
             await operation.timeout(const Duration(seconds: 1));
           } on TimeoutException {
-            _log('seek intent recovery timed out; late completion is guarded');
+            permit.invalidate();
+            _log('seek intent recovery timed out; EOF remains fenced until a confirmed seek');
             if (_seekRepairs[player] == true) continue;
             break;
           }
@@ -1013,6 +1048,7 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
     if (measured) measurements.beginRefresh();
     try {
       final snapshot = _snapshots.capture();
+      final endEligible = !_seekRepairs.containsKey(player);
       final native = player.platform as NativePlayer;
       final values = await Future.wait([
         _property(native, 'time-pos'), _property(native, 'duration'),
@@ -1073,7 +1109,8 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
           ? state.playing
           : (values[5] == 'no' || values[5] == 'false') && values[6] != 'yes' && values[6] != 'true',
         'buffering': state.buffering,
-        'ended': values[6] == null ? state.completed : values[6] == 'yes' || values[6] == 'true',
+        'ended': endEligible && !_seekRepairs.containsKey(player) &&
+            _snapshots.confirmsEnd(snapshot, eof: values[6], seeking: values[14]),
         'failure': _failure, 'diagnostics': _diagnostics,
         'tracks': {'audioTracks': audioRows, 'subtitleTracks': subtitleRows,
           'audioTrack': audio.indexWhere((track) => track.id == values[3]),

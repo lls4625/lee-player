@@ -143,20 +143,26 @@ struct PlaybackEndGate {
   }
   mutating func offer() { candidate = true }
   mutating func beginOperation() { explicitEndOperation = nil }
-  mutating func settled(operation: Int, rawTarget: Double, position: Double, duration: Double) {
+  mutating func settled(operation: Int, rawTarget: Double, position: Double, duration: Double,
+                        confirmedEngineEnd: Bool = false, endpointSeekTolerance: Double? = nil) {
     guard duration.isFinite, duration > 0, position.isFinite else { return }
+    // A successfully positioned new playback pass may itself end on a frame
+    // before duration. Do not leave it disarmed by the preceding pass's EOF.
+    if consumedOperation != operation, confirmedEngineEnd || endpointSeekTolerance != nil {
+      armed = true
+    }
     // The raw target is retained before clamp; a near-end seek is not EOF.
     if rawTarget >= duration,
-       abs(position - Self.seekTarget(rawTarget, duration: duration)) <= max(0.002, Self.tolerance(duration)) {
+       abs(position - Self.seekTarget(rawTarget, duration: duration)) <= (endpointSeekTolerance ?? max(0.002, Self.tolerance(duration))) {
       explicitEndOperation = operation
     } else {
       explicitEndOperation = nil
-      if !Self.isAtEnd(position, duration: duration) {
+      if !confirmedEngineEnd && !Self.isAtEnd(position, duration: duration) {
         candidate = false; armed = true; consumedOperation = nil
       }
     }
   }
-  mutating func consume(operation: Int, position: Double, duration: Double) -> Bool {
+  mutating func consume(operation: Int, position: Double, duration: Double, confirmedEngineEnd: Bool = false) -> Bool {
     if explicitEndOperation == operation, consumedOperation != operation {
       candidate = false; armed = false; consumedOperation = operation
       explicitEndOperation = nil
@@ -164,7 +170,10 @@ struct PlaybackEndGate {
     }
     guard candidate else { return false }
     candidate = false
-    guard armed, Self.isAtEnd(position, duration: duration) else { return false }
+    // libmpv EOF is authoritative after the Dart seek/snapshot fences. Its
+    // final output timestamp need not equal container duration (last frame).
+    // AVPlayer notifications retain the original strict timeline check.
+    guard armed, confirmedEngineEnd || Self.isAtEnd(position, duration: duration) else { return false }
     armed = false; consumedOperation = operation
     return true
   }
@@ -325,7 +334,7 @@ struct SubtitleCue {
 }
 
 final class PlaybackService: NSObject {
-  private static let pipDiagnosticBuild = "pip-idle-source-20261012-r6"
+  private static let pipDiagnosticBuild = "pip-eof-settled-20261012-r7"
   static func matchesPiPAbort(engineID: String, requestID: String,
                               currentEngineID: String?, currentRequestID: String?) -> Bool {
     !engineID.isEmpty && !requestID.isEmpty
@@ -1560,7 +1569,8 @@ final class PlaybackService: NSObject {
         self.initialPositionEstablished = true
         self.initialHistoricalSeekPending = false
         self.sessionCompleted = false; self.atPlaybackEnd = false; self.pendingEndAction = false
-        self.endGate.settled(operation: operation, rawTarget: seconds, position: self.position, duration: self.duration)
+        self.endGate.settled(operation: operation, rawTarget: seconds, position: self.position, duration: self.duration,
+          confirmedEngineEnd: self.mediaKit?.ended == true, endpointSeekTolerance: self.mediaKit == nil ? nil : 0.35)
         if self.wantsPlayback { self.attemptAudioRecovery() }
         self.endIntroBackgroundTask()
         self.persist(); self.publish()
@@ -1782,7 +1792,8 @@ final class PlaybackService: NSObject {
         self.initialPositionEstablished = true
         self.initialHistoricalSeekPending = false
         self.sessionCompleted = false; self.atPlaybackEnd = false; self.pendingEndAction = false
-        self.endGate.settled(operation: operation, rawTarget: seconds, position: self.position, duration: self.duration)
+        self.endGate.settled(operation: operation, rawTarget: seconds, position: self.position, duration: self.duration,
+          confirmedEngineEnd: self.mediaKit?.ended == true, endpointSeekTolerance: self.mediaKit == nil ? nil : 0.35)
         self.resolveEndCandidate()
         guard self.generation == token, self.playbackOperation == operation else { completion(true); return }
         if self.wantsPlayback && !self.scrubbing && !self.sessionCompleted { self.attemptAudioRecovery() }
@@ -1944,7 +1955,7 @@ final class PlaybackService: NSObject {
 
   private func resolveEndCandidate() {
     guard initialPositionEstablished, !loading, !isSeeking, !scrubbing, replayOperation == nil,
-      endGate.consume(operation: playbackOperation, position: position, duration: duration) else { return }
+      endGate.consume(operation: playbackOperation, position: position, duration: duration, confirmedEngineEnd: mediaKit?.ended == true) else { return }
     recordLifecycle("EOF consumed")
     // Consume before dispatching callbacks. An A–B repeat does not complete the
     // entire media or overwrite its history with a completed zero.

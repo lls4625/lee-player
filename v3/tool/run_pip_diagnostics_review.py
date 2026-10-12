@@ -87,7 +87,7 @@ def source_checks(source, bridge, localizations):
         check(f'recordAVPlayerPiPEvent("{event}", controller: controller, includeSource: true)' in block(source, anchor),
               f'{event} captures a detailed snapshot')
     check('canStopPictureInPicture' not in source, 'no unverified canStop API dependency')
-    check('private static let pipDiagnosticBuild = "pip-idle-source-20261012-r6"' in source,
+    check('private static let pipDiagnosticBuild = "pip-eof-settled-20261012-r7"' in source,
           'diagnostic build has a stable local marker')
     info = block(source, '  func playbackInfo()')
     check('result["lifecycleEvents"] = ["PiP diagnostics build=\\(Self.pipDiagnosticBuild)"] + lifecycleEvents' in info,

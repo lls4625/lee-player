@@ -78,5 +78,73 @@ check(snapshots.accepts(["positionVersion": 1, "snapshotSequence": 11]),
 check(!snapshots.accepts(["positionVersion": 2, "snapshotSequence": 12]), "future version rejected")
 check(snapshots.accepts(["positionVersion": 1, "snapshotSequence": 12, "failure": "seek_failed"]),
       "current failure-only state follows the same version fence")
+// Confirmed libmpv EOF is distinct from a position-only or AVPlayer hint.
+for finalPosition in [119.958333, 119.96, 119.966667, 119.983333] {
+  var gate = PlaybackEndGate()
+  gate.offer()
+  check(gate.consume(operation: 1, position: finalPosition, duration: 120, confirmedEngineEnd: true),
+        "current libmpv EOF accepts final-frame timestamp")
+  gate.offer()
+  check(!gate.consume(operation: 1, position: finalPosition, duration: 120, confirmedEngineEnd: true),
+        "confirmed EOF still consumes only once")
+}
+var actualR6 = PlaybackEndGate()
+actualR6.beginOperation()
+actualR6.settled(operation: 192, rawTarget: 10871.392, position: 10871.318, duration: 10871.392,
+  endpointSeekTolerance: 0.35)
+check(actualR6.consume(operation: 192, position: 10871.318, duration: 10871.392),
+      "r6 log endpoint seek is acknowledged at its real final frame")
+var nearMK = PlaybackEndGate()
+nearMK.beginOperation()
+nearMK.settled(operation: 2, rawTarget: 119.95, position: 119.95, duration: 120,
+  endpointSeekTolerance: 0.35)
+check(!nearMK.consume(operation: 2, position: 119.95, duration: 120),
+      "MK seek tolerance does not fabricate EOF for ordinary near-end intent")
+var seekEOF = PlaybackEndGate()
+seekEOF.beginOperation(); seekEOF.offer()
+seekEOF.settled(operation: 3, rawTarget: 119.98, position: 119.967, duration: 120,
+  confirmedEngineEnd: true, endpointSeekTolerance: 0.35)
+check(seekEOF.consume(operation: 3, position: 119.967, duration: 120, confirmedEngineEnd: true),
+      "current settled actual EOF survives a final-frame seek")
+var failedEnd = PlaybackEndGate()
+failedEnd.beginOperation()
+failedEnd.settled(operation: 4, rawTarget: 120, position: 115, duration: 120,
+  endpointSeekTolerance: 0.35)
+check(!failedEnd.consume(operation: 4, position: 115, duration: 120),
+      "endpoint intent still requires confirmed positioning")
+var staleMK = PlaybackEndGate()
+staleMK.beginOperation(); staleMK.offer()
+staleMK.settled(operation: 5, rawTarget: 35, position: 35, duration: 120,
+  confirmedEngineEnd: false, endpointSeekTolerance: 0.35)
+check(!staleMK.consume(operation: 5, position: 35, duration: 120),
+      "seek away clears earlier MK EOF")
+var avHint = PlaybackEndGate()
+avHint.offer()
+check(!avHint.consume(operation: 6, position: 119.967, duration: 120),
+      "AVPlayer and unconfirmed EOF retain the original 5ms threshold")
+var nextPassEOF = PlaybackEndGate()
+nextPassEOF.offer()
+check(nextPassEOF.consume(operation: 10, position: 119.967, duration: 120, confirmedEngineEnd: true),
+      "first playback pass consumes genuine MK EOF")
+nextPassEOF.beginOperation(); nextPassEOF.offer()
+nextPassEOF.settled(operation: 11, rawTarget: 119.98, position: 119.967, duration: 120,
+  confirmedEngineEnd: true, endpointSeekTolerance: 0.35)
+check(nextPassEOF.consume(operation: 11, position: 119.967, duration: 120, confirmedEngineEnd: true),
+      "new confirmed playback pass at EOF is independently consumable")
+nextPassEOF.offer()
+check(!nextPassEOF.consume(operation: 11, position: 119.967, duration: 120, confirmedEngineEnd: true),
+      "same new playback pass still consumes only once")
+var nearAfterEOF = PlaybackEndGate()
+nearAfterEOF.offer()
+check(nearAfterEOF.consume(operation: 20, position: 120, duration: 120, confirmedEngineEnd: true),
+      "consume preceding pass before near-end seek")
+nearAfterEOF.beginOperation()
+nearAfterEOF.settled(operation: 21, rawTarget: 119.999, position: 119.999, duration: 120,
+  confirmedEngineEnd: false, endpointSeekTolerance: 0.35)
+check(!nearAfterEOF.consume(operation: 21, position: 119.999, duration: 120),
+      "successful MK near-end seek rearms but does not invent EOF")
+nearAfterEOF.offer()
+check(nearAfterEOF.consume(operation: 21, position: 119.999, duration: 120, confirmedEngineEnd: true),
+      "subsequent real EOF is accepted after new near-end seek")
 print("Replay gate review: \(checks - failures)/\(checks) checks passed")
 if failures > 0 { exit(1) }

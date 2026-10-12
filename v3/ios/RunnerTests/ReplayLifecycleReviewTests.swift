@@ -569,4 +569,54 @@ final class ReplayLifecycleReviewTests: XCTestCase {
     XCTAssertEqual(state["loading"] as? Bool, false)
   }
 
+
+  func testCurrentMKFinalFrameEOFAdvancesOnceWithoutExactDurationPosition() throws {
+    let service = try makeService()
+    configure(["mode": "sequence", "continuous": true], service: service)
+    service.play()
+    let oldEngine = try XCTUnwrap(service.mediaKitEngineId)
+    send(["position": 119.967, "ended": true], to: service)
+    waitUntil { service.currentPath == "b.mkv" && service.mediaKitEngineId != oldEngine }
+    let opens = transport.opens
+    send(["position": 120.0, "ended": true], to: service, engineID: oldEngine)
+    XCTAssertEqual(transport.opens, opens)
+    XCTAssertEqual(service.currentPath, "b.mkv")
+  }
+
+  func testMKFinalFrameEOFSelectsFollowingMP4() throws {
+    let service = try makeService(paths: ["a.mkv", "b.mp4"])
+    configure(["mode": "sequence", "continuous": true], service: service)
+    service.play()
+    send(["position": 119.967, "ended": true], to: service)
+    // The dummy file does not exercise AV decoding. This tests queue routing.
+    XCTAssertEqual(service.currentPath, "b.mp4")
+  }
+
+  func testR6EndpointSeekAcceptsConfirmedFinalFrameGapWithoutEOF() throws {
+    let service = try makeService()
+    configure(["mode": "one", "continuous": true], service: service)
+    send(["duration": 10871.392], to: service)
+    service.play()
+    transport.holdSeeks = true
+    service.seek(10871.392)
+    XCTAssertEqual(transport.heldSeeks[0].seconds, 10871.391, accuracy: 0.000001)
+    try settle(0, service: service, position: 10871.318, ended: false)
+    XCTAssertEqual(transport.heldSeeks.count, 2)
+    XCTAssertEqual(transport.heldSeeks[1].seconds, 0)
+  }
+
+  func testCurrentEOFAtNewNearEndSeekRearmsOnlyThatPass() throws {
+    let service = try makeService()
+    send(["position": 119.967, "ended": true], to: service)
+    transport.holdSeeks = true
+    service.seek(119.98)
+    try settle(0, service: service, position: 119.967, ended: true)
+    XCTAssertEqual(transport.heldSeeks.count, 1, "paused EOF must not autoplay")
+    service.play()
+    XCTAssertEqual(transport.heldSeeks.count, 2, "new pass was marked ended and can replay")
+    XCTAssertEqual(transport.heldSeeks[1].seconds, 0)
+    send(["position": 119.967, "ended": true], to: service)
+    XCTAssertEqual(transport.heldSeeks.count, 2)
+  }
+
 }
