@@ -150,6 +150,26 @@ class PlayerModel extends ChangeNotifier {
   String get path => state['path'] as String? ?? '';
   bool get playing => state['playing'] == true;
   bool get loading => state['loading'] == true;
+  bool get presentationWaiting => state['presentationWaiting'] == true;
+  // One action for both the transport icon and the command it sends. Retained
+  // native intent is not an active Play action after interruption/exhaustion.
+  // Ordinary pending recovery still offers Pause so the user can cancel it.
+  bool get transportShowsPause {
+    // Ownership may still be waiting after autoplay was cancelled. This action
+    // remains an idempotent Pause, never permission to start unavailable output.
+    if (presentationWaiting) return true;
+    final desired = _toggleGeneration == state['generation'] ? _desiredPlaying : null;
+    if (desired != null) return desired;
+    if (playing || loading) return true;
+    if (state['interrupted'] == true || state['audioRecovery'] == 'exhausted' ||
+        playbackIssue != null) return false;
+    return state['wantsPlayback'] == true;
+  }
+  AppMessage? get playbackIssue {
+    final code = state['error'] as String? ?? '';
+    if (code.isEmpty) return null;
+    return AppMessage(code);
+  }
   double get position => number('position');
   double get duration => number('duration');
   double number(String key, [double fallback = 0]) =>
@@ -636,11 +656,20 @@ class PlayerModel extends ChangeNotifier {
     List<MediaEntry> files,
     MediaEntry selected, {
     bool resume = true,
-  }) => command(
+  }) => openPaths(
+    files.map((item) => item.path).toList(),
+    files.indexWhere((item) => item.path == selected.path),
+    resume: resume,
+  );
+
+  // Both the library and playback queue must apply the native reply. An event
+  // can arrive later; selecting another file must not leave the previous
+  // session's error/controls on screen until that event reaches Flutter.
+  Future<bool> openPaths(List<String> paths, int index, {bool resume = true}) => command(
     'open',
     args: {
-      'paths': files.map((item) => item.path).toList(),
-      'index': files.indexWhere((item) => item.path == selected.path),
+      'paths': paths,
+      'index': index,
       'resume': resume,
     },
     onValue: _applyState,
@@ -701,17 +730,35 @@ class PlayerModel extends ChangeNotifier {
   Future<bool> cancelScrub() => command('cancelScrub');
   bool? _desiredPlaying;
   Future<bool>? _toggleDrain;
+  Object? _toggleGeneration;
+  int _toggleEpoch = 0;
   Future<bool> toggle() {
-    _desiredPlaying = !(_desiredPlaying ?? (state['wantsPlayback'] as bool? ?? (playing || loading)));
-    return _toggleDrain ??= _drainToggle().whenComplete(() {
+    final cancelPresentationWait = presentationWaiting;
+    final generation = state['generation'];
+    // Pause must not queue behind an unresolved Play reply. This invalidates
+    // only its Dart receipt; native pause still owns cancelling actual autoplay.
+    if (cancelPresentationWait) invalidateCommandResult('play');
+    if (_toggleDrain != null &&
+        (_toggleGeneration != generation || cancelPresentationWait)) {
+      _toggleEpoch++;
       _toggleDrain = null; _desiredPlaying = null;
+    }
+    _toggleGeneration = generation;
+    _desiredPlaying = cancelPresentationWait ? false : !transportShowsPause;
+    _notify();
+    if (_toggleDrain != null) return _toggleDrain!;
+    final epoch = ++_toggleEpoch;
+    return _toggleDrain = _drainToggle(generation, epoch).whenComplete(() {
+      if (epoch != _toggleEpoch) return;
+      _toggleDrain = null; _desiredPlaying = null; _notify();
     });
   }
-  Future<bool> _drainToggle() async {
-    final generation = state['generation'];
-    while (!_disposed && generation == state['generation']) {
+  Future<bool> _drainToggle(Object? generation, int epoch) async {
+    while (!_disposed && epoch == _toggleEpoch && generation == state['generation']) {
       final desired = _desiredPlaying!;
+      if (desired && presentationWaiting) return false;
       if (!await command(desired ? 'play' : 'pause', onValue: _applyState)) return false;
+      if (epoch != _toggleEpoch) return false;
       if (_desiredPlaying == desired) return true;
     }
     return false;

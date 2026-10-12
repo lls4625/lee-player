@@ -227,3 +227,161 @@ class MediaKitSnapshotFence {
     return true;
   }
 }
+
+/// An empty result is not software decoding. media_kit 1.2.6 collapses libmpv
+/// property-unavailable/error into an empty string; retain that uncertainty.
+enum MediaKitPropertyStatus { value, unavailable, error, timeout }
+
+class MediaKitPropertyRead {
+  const MediaKitPropertyRead(this.status, [this.value]);
+  final MediaKitPropertyStatus status;
+  final String? value;
+
+  static Future<MediaKitPropertyRead> read(Future<String> Function() read, {
+    Duration timeout = const Duration(milliseconds: 750),
+  }) async {
+    try {
+      final value = (await read().timeout(timeout)).trim();
+      return value.isEmpty
+          ? const MediaKitPropertyRead(MediaKitPropertyStatus.unavailable)
+          : MediaKitPropertyRead(MediaKitPropertyStatus.value, value);
+    } on TimeoutException {
+      return const MediaKitPropertyRead(MediaKitPropertyStatus.timeout);
+    } catch (_) {
+      return const MediaKitPropertyRead(MediaKitPropertyStatus.error);
+    }
+  }
+}
+
+enum MediaKitDecoderAction { none, requestRepair, stop }
+
+/// A conservative symptom detector, not a video-frame health measurement.
+/// Requires the specific VT session failure and both failed VT methods before
+/// considering later sustained audio starvation. Ordinary warnings, a lone
+/// underrun, buffering, and timeline advancement cannot establish this case.
+class MediaKitDecoderRecoveryMonitor {
+  static const fallbackGrace = Duration(seconds: 4);
+  static const evidenceLifetime = Duration(seconds: 30);
+  static const underrunWindow = Duration(seconds: 3);
+  int? _invalidAt, _directFailedAt, _copyFailedAt, _observationStart;
+  final List<int> _underruns = [];
+  bool _requestOutstanding = false;
+  bool _attempted = false;
+  bool _stopped = false;
+
+  bool get attempted => _attempted;
+  bool get hasEvidence => _invalidAt != null;
+
+  void record(String prefix, String message, int now) {
+    if (_invalidAt != null && now - _invalidAt! > evidenceLifetime.inMilliseconds) {
+      _invalidAt = _directFailedAt = _copyFailedAt = null;
+      _underruns.clear();
+    }
+    final source = prefix.toLowerCase();
+    final text = message.trim().toLowerCase();
+    if (source.startsWith('ffmpeg/video') &&
+        text.contains('failed to decode frame (invalid session, -12903)')) {
+      _invalidAt ??= now;
+    }
+    if (source == 'vd') {
+      if (text == 'attempting next decoding method after failure of h264-videotoolbox.') {
+        _directFailedAt ??= now;
+      } else if (text == 'attempting next decoding method after failure of h264-videotoolbox-copy.') {
+        _copyFailedAt ??= now;
+      }
+    }
+    if (source == 'cplayer' && text == 'audio device underrun detected.') {
+      _underruns.add(now);
+      _prune(now);
+    }
+  }
+
+  void _prune(int now) => _underruns.removeWhere(
+      (time) => now - time > underrunWindow.inMilliseconds);
+
+  /// Preserve recent decoder evidence through a seek/pause, but start a fresh
+  /// continuous observation after it. A user operation is never a failure.
+  void suspend() { _underruns.clear(); _observationStart = null; }
+
+  void beginRepair(int now) {
+    _attempted = true;
+    _requestOutstanding = false;
+    _underruns.clear();
+    _observationStart = now;
+  }
+
+  void requestDeclined() { _requestOutstanding = false; suspend(); }
+
+  MediaKitDecoderAction evaluate(int now, {required bool eligible}) {
+    if (_stopped || _requestOutstanding) return MediaKitDecoderAction.none;
+    if (!eligible) { suspend(); return MediaKitDecoderAction.none; }
+    _observationStart ??= now;
+    final evidence = [_invalidAt, _directFailedAt, _copyFailedAt];
+    if (evidence.any((time) => time == null || now - time > evidenceLifetime.inMilliseconds)) {
+      return MediaKitDecoderAction.none;
+    }
+    final latestFailure = evidence.whereType<int>().reduce((a, b) => a > b ? a : b);
+    if (now - latestFailure < fallbackGrace.inMilliseconds ||
+        now - _observationStart! < fallbackGrace.inMilliseconds) {
+      return MediaKitDecoderAction.none;
+    }
+    _prune(now);
+    if (_underruns.length < 5 || _underruns.last - _underruns.first < 1000) {
+      return MediaKitDecoderAction.none;
+    }
+    if (_attempted) { _stopped = true; return MediaKitDecoderAction.stop; }
+    _requestOutstanding = true;
+    return MediaKitDecoderAction.requestRepair;
+  }
+}
+
+enum MediaKitDecoderRepairResult { restored, superseded }
+
+/// Runs libmpv's documented hwdec reinitialization in the existing player.
+/// No file, tracks, subtitle state, render context or playback rate is replaced.
+/// The adapter verifies writes by reading back the configured hwdec property.
+Future<MediaKitDecoderRepairResult> reinitializeMediaKitDecoder({
+  required String hardwarePolicy,
+  required bool Function() sameSession,
+  required bool Function() samePositionIntent,
+  required bool Function() wantsPlayback,
+  required Future<void> Function() pause,
+  required Future<void> Function(String) writeHardwarePolicy,
+  required Future<void> Function() restorePosition,
+  required Future<void> Function() resume,
+  Duration stepTimeout = const Duration(seconds: 2),
+}) async {
+  if (hardwarePolicy.isEmpty || hardwarePolicy == 'no') {
+    throw StateError('No enabled hardware decode policy to reinitialize');
+  }
+  bool current() => sameSession() && samePositionIntent();
+  if (!current() || !wantsPlayback()) return MediaKitDecoderRepairResult.superseded;
+  await pause().timeout(stepTimeout);
+  if (!current() || !wantsPlayback()) return MediaKitDecoderRepairResult.superseded;
+  try {
+    try {
+      await writeHardwarePolicy('no').timeout(stepTimeout);
+    } finally {
+      // Even a failed disable/readback must restore the old policy. A new player
+      // must never receive this old session's setting. The production adapter
+      // issues synchronous initialized writes, with no delayed initialization.
+      if (sameSession()) {
+        await writeHardwarePolicy(hardwarePolicy).timeout(stepTimeout);
+      }
+    }
+  } catch (_) {
+    // Cleanup still ran. A late readback failure is not a failure of a newer
+    // user seek/session and must not pause or fail that new operation.
+    if (!current()) return MediaKitDecoderRepairResult.superseded;
+    rethrow;
+  }
+  if (!current()) return MediaKitDecoderRepairResult.superseded;
+  // mpv automatically seeks to its last video PTS after hwdec changes. In this
+  // failure that frame may be stale; preserve the latest pre-repair time-pos.
+  await restorePosition();
+  if (!current()) return MediaKitDecoderRepairResult.superseded;
+  if (wantsPlayback()) await resume().timeout(stepTimeout);
+  return current()
+      ? MediaKitDecoderRepairResult.restored
+      : MediaKitDecoderRepairResult.superseded;
+}

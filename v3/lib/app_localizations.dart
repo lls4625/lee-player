@@ -189,6 +189,14 @@ class AppLocalizations {
       ),
       line(pick('可定位', '可定位', 'シーク可能', 'Seekable'), yesNo(info['seekable'])),
     ];
+    final errorCode = info['errorCode'];
+    if (errorCode is String && errorCode.isNotEmpty) {
+      lines.add(line(pick('播放错误', '播放錯誤', '再生エラー', 'Playback error'),
+          message(AppMessage(errorCode))));
+    }
+    if (info['presentationWaiting'] == true) {
+      lines.add(text('正在等待画中画结束'));
+    }
     if (info['decoderCode'] != null) {
       lines.add(
         line(
@@ -220,6 +228,26 @@ class AppLocalizations {
         '${pick('实际硬解', '實際硬解', 'ハードウェアデコード', 'Hardware decode')}$colon${value(info['hwdec'])}$separator'
         '${pick('视频输出', '影片輸出', '映像出力', 'video output')}$colon${value(info['vo'])}',
       );
+      if (info['hwdecReadStatus'] != null) {
+        final status = switch (info['hwdecReadStatus']) {
+          'value' => pick('已读取', '已讀取', '取得済み', 'read'),
+          'timeout' => pick('读取超时', '讀取逾時', '読み取りタイムアウト', 'read timed out'),
+          'error' => pick('读取异常', '讀取異常', '読み取りエラー', 'read failed'),
+          _ => pick('未提供（底层未返回值，非软件解码确认）', '未提供（底層未傳回值，非軟解確認）', '値なし（ソフトウェアデコードの確認ではありません）', 'unavailable (no returned value; software decoding is not confirmed)'),
+        };
+        lines.add(line(pick('硬解读取状态', '硬解讀取狀態', 'デコード値の取得状態', 'Decode property status'), status));
+        lines.add(line(pick('硬解配置', '硬解設定', 'デコード設定', 'Configured hwdec'), info['configuredHwdec']));
+      }
+      if (info['decoderRecovery'] != null) {
+        lines.add(line(pick('解码恢复状态', '解碼恢復狀態', 'デコーダー復旧状態', 'Decoder recovery status'), info['decoderRecovery']));
+      }
+      if (info['subtitleFontStatus'] != null) {
+        lines.add(line(pick('字幕备用字体', '字幕備用字型', '字幕フォールバックフォント', 'Subtitle fallback font'),
+            '${value(info['subtitleFontFamily'])} (${value(info['subtitleFontStatus'])})'));
+      }
+      if (info['engineAvsync'] != null) {
+        lines.add(line(pick('引擎估算音画差（非实测）', '引擎估算音畫差（非實測）', 'エンジン推定A/V差（実測ではない）', 'Engine A/V estimate (not measured output)'), info['engineAvsync']));
+      }
       lines.add(
         '${pick('解码丢帧', '解碼丟幀', 'デコードドロップ', 'Decoder drops')}$colon${value(info['decoderDrops'])}$separator'
         '${pick('输出丢帧', '輸出丟幀', '出力ドロップ', 'output drops')}$colon${value(info['outputDrops'])}',
@@ -230,6 +258,55 @@ class AppLocalizations {
         '${pick('本次引擎运行', '本次引擎運行', 'エンジン稼働時間', 'Engine runtime')}$colon$age ${pick('秒', '秒', '秒', 'sec')}$separator'
         '${pick('会话', '會話', 'セッション', 'session')} ${value(info['generation'])}',
       );
+      final timing = info['playbackTiming'];
+      if (timing is Map) {
+        Map section(Object? raw) => raw is Map ? raw : const {};
+        String number(Object? raw) => raw is num && raw.isFinite
+            ? raw.toStringAsFixed(1) : value(null);
+        String count(Object? raw) => raw is num && raw.isFinite
+            ? raw.toInt().toString() : value(null);
+        final noSamples = pick('尚无样本', '尚無樣本', 'サンプルなし', 'no samples');
+        String pair(Object? raw) {
+          final item = section(raw);
+          if (item['count'] is! num || (item['count'] as num) <= 0) return noSamples;
+          return '${number(item['meanMs'])}/${number(item['maxMs'])} (n=${count(item['count'])})';
+        }
+        final refresh = section(timing['refresh']);
+        final phases = section(timing['phases']);
+        final heartbeat = section(timing['heartbeat']);
+        final nativeTiming = section(info['nativePlaybackTiming']);
+        final seek = section(timing['lastSeek']);
+        final receipts = section(timing['receipts']);
+        String receiptCounts(String method) {
+          final row = section(receipts[method]);
+          return ['superseded', 'stale', 'timeout', 'exception'].map((key) => count(row[key])).join('/');
+        }
+        final dartGap = (heartbeat['gapCount'] as num? ?? 0) > 0
+            ? number(heartbeat['maxGapExcessMs']) : noSamples;
+        final nativeGap = (nativeTiming['gapCount'] as num? ?? 0) > 0
+            ? number(nativeTiming['maxGapExcessMs']) : noSamples;
+        lines.add('${pick('本会话前台播放计量（无控制命令；墙钟耗时，非FFI或实际输出时间）', '本工作階段前台播放計量（無控制命令；牆鐘耗時，非FFI或實際輸出時間）', 'このセッションの前景再生計測（操作中を除く、経過時間。FFI・実出力時間ではない）', 'Session foreground playback measurement (no pending controls; elapsed, not FFI or actual output time)')}$colon'
+            '${pick('模式', '模式', 'モード', 'mode')} ${value(timing['buildMode'])}$separator'
+            '${pick('已完成刷新样本', '已完成更新樣本', '完了した更新サンプル', 'completed refresh samples')} ${count(refresh['count'])}$separator'
+            '>250 ms ${count(refresh['over250'])}$separator'
+            '${pick('在途/峰值', '進行中/峰值', '進行中/最大', 'in-flight/peak')} ${count(refresh['current'])}/${count(refresh['peak'])}');
+        lines.add('${pick('刷新均值/最大毫秒（已完成样本，下一次上报）', '更新平均/最大毫秒（已完成樣本，下次回報）', '更新の平均/最大ms（完了サンプル、次回報告）', 'Refresh mean/max ms (completed samples, reported next update)')}$colon'
+            '${pick('总计', '總計', '合計', 'total')} ${pair(refresh)}$separator'
+            '${pick('属性批次', '屬性批次', '属性バッチ', 'property batch')} ${pair(phases['properties'])}$separator'
+            '${pick('组包', '組包', '組立', 'assembly')} ${pair(phases['build'])}$separator'
+            '${pick('桥接', '橋接', 'ブリッジ', 'bridge')} ${pair(phases['bridge'])}');
+        lines.add('${pick('心跳超额间隔最大毫秒', '心跳超額間隔最大毫秒', 'ハートビート超過間隔の最大ms', 'Maximum heartbeat excess gap ms')}$colon'
+            'Dart $dartGap (n=${count(heartbeat['gapCount'])}, ${pick('忙碌跳过', '忙碌略過', 'ビジー省略', 'busy skips')}=${count(heartbeat['busySkips'])})$separator'
+            'Native $nativeGap (n=${count(nativeTiming['gapCount'])})$separator'
+            '${pick('App音频会话调用次数（激活/停用，不代表设备状态）', 'App音訊工作階段呼叫次數（啟用/停用，非裝置狀態）', 'App音声セッション呼出数（有効/無効、機器状態ではない）', 'App audio-session calls (activate/deactivate, not device state)')} '
+            '${count(nativeTiming['audioActivateCount'])}/${count(nativeTiming['audioDeactivateCount'])} ${value(nativeTiming['audioLastReason'])}');
+        lines.add('${pick('最近定位墙钟毫秒', '最近定位牆鐘毫秒', '直近シーク経過ms', 'Last seek elapsed ms')}$colon'
+            '${seek.isEmpty ? noSamples : '${pick('暂停/命令/确认/刷新/总计', '暫停/命令/確認/更新/總計', '一時停止/コマンド/確認/更新/合計', 'pause/command/confirmation/refresh/total')} '
+                '${number(seek['pauseMs'])}/${number(seek['commandMs'])}/${number(seek['confirmMs'])}/${number(seek['refreshMs'])}/${number(seek['totalMs'])}; '
+                '${value(seek['outcome'])}; id=${value(seek['requestId'])}'}$separator'
+            '${pick('应用回执（取代/过期/超时/异常）', '應用回執（取代/過期/逾時/異常）', 'アプリ応答（置換/失効/時間切れ/例外）', 'App receipts (superseded/stale/timeout/exception)')} '
+            'play=${receiptCounts('play')}, pause=${receiptCounts('pause')}');
+      }
       lines.add(
         pick(
           '实际音视频输出时间戳及音画偏差未测量；定位完成不代表首帧显示或同步完成。',
@@ -280,6 +357,11 @@ class AppLocalizations {
         pick('最近控制事件：', '最近控制事件：', '最近の制御イベント：', 'Recent control events:'),
       );
       lines.addAll(events.map((event) => '$event'));
+    }
+    final lifecycle = (info['lifecycleEvents'] as List?)?.cast<Object?>() ?? const [];
+    if (lifecycle.isNotEmpty) {
+      lines.add(pick('最近生命周期事件：', '最近生命週期事件：', '最近のライフサイクルイベント：', 'Recent lifecycle events:'));
+      lines.addAll(lifecycle.map((event) => '$event'));
     }
     final logs = (info['engineLogs'] as List?)?.cast<Object?>() ?? const [];
     if (logs.isNotEmpty) {
@@ -390,24 +472,6 @@ class AppLocalizations {
       'zh-Hant': '操作識別碼無效，未執行檔案操作',
       'ja': '操作 ID が無効なため、ファイル操作は実行されませんでした',
       'en': 'The operation ID was invalid, so no file operation was performed.',
-    },
-    'audio_recovery_failed': {
-      'zh-Hans': '音频自动恢复失败，可点击播放手动重试',
-      'zh-Hant': '音訊自動恢復失敗，可點擊播放手動重試',
-      'ja': '音声を自動復帰できませんでした。再生をタップして再試行できます',
-      'en': 'Automatic audio recovery failed. Tap play to try again manually.',
-    },
-    'media_engine_cleanup_failed': {
-      'zh-Hans': '旧播放引擎或画中画尚未确认停止，已暂停播放。请完全关闭并重新打开 App 后再试。',
-      'zh-Hant': '舊播放引擎或子母畫面尚未確認停止，已暫停播放。請完全關閉並重新開啟 App 後再試。',
-      'ja': '以前の再生エンジンまたはピクチャインピクチャの停止を確認できません。再生を一時停止しました。アプリを完全に終了してから開き直してください。',
-      'en': 'Stopping the previous playback engine or Picture in Picture could not be confirmed. Playback is paused. Fully close and reopen the app before trying again.',
-    },
-    'pip_restore_stale': {
-      'zh-Hans': '画中画恢复请求已过期',
-      'zh-Hant': '畫中畫恢復請求已過期',
-      'ja': 'Picture in Picture の復帰リクエストは期限切れです',
-      'en': 'The Picture in Picture restore request expired.',
     },
     'native_service_disconnected': {
       'zh-Hans': '无法连接 iOS 播放服务',
@@ -651,16 +715,16 @@ class AppLocalizations {
       'en': 'Unable to obtain audio playback permission.',
     },
     'seek_failed': {
-      'zh-Hans': '无法完成定位，请点击重试重新打开媒体',
-      'zh-Hant': '無法完成定位，請點選重試重新開啟媒體',
-      'ja': 'シークを完了できません。再試行してメディアを開き直してください',
-      'en': 'Unable to seek. Tap Retry to reopen the media.',
+      'zh-Hans': '无法完成定位',
+      'zh-Hant': '無法完成定位',
+      'ja': 'シークを完了できません',
+      'en': 'Unable to seek.',
     },
     'seek_timeout': {
-      'zh-Hans': '定位超时，请点击重试重新打开媒体',
-      'zh-Hant': '定位逾時，請點選重試重新開啟媒體',
-      'ja': 'シークがタイムアウトしました。再試行してメディアを開き直してください',
-      'en': 'Seeking timed out. Tap Retry to reopen the media.',
+      'zh-Hans': '定位超时',
+      'zh-Hant': '定位逾時',
+      'ja': 'シークがタイムアウトしました',
+      'en': 'Seeking timed out.',
     },
     'open_timeout': {
       'zh-Hans': '打开媒体超时，请检查文件是否完整下载或复制后重试',
@@ -747,12 +811,6 @@ class AppLocalizations {
       'en':
           'The subtitle has no readable timeline. Use a UTF-8 SRT or VTT file.',
     },
-    'pip_ending': {
-      'zh-Hans': '画中画正在结束，请稍后重试',
-      'zh-Hant': '子母畫面正在結束，請稍後再試',
-      'ja': 'ピクチャ・イン・ピクチャを終了中です。少し待ってからお試しください',
-      'en': 'Picture in Picture is ending. Try again shortly.',
-    },
     'pip_audio_unnecessary': {
       'zh-Hans': '纯音频可在后台播放，无需画中画',
       'zh-Hant': '純音訊可在背景播放，無需子母畫面',
@@ -764,60 +822,6 @@ class AppLocalizations {
       'zh-Hant': '目前裝置不支援子母畫面',
       'ja': 'この端末はピクチャ・イン・ピクチャに対応していません',
       'en': 'This device does not support Picture in Picture.',
-    },
-    'pip_busy': {
-      'zh-Hans': '画中画正在处理，请勿连续点击',
-      'zh-Hant': '子母畫面正在處理，請勿連續點選',
-      'ja': 'ピクチャ・イン・ピクチャを処理中です。繰り返しタップしないでください',
-      'en': 'Picture in Picture is being processed. Do not tap repeatedly.',
-    },
-    'pip_request_invalid': {
-      'zh-Hans': '画中画请求无效，请重试',
-      'zh-Hant': '子母畫面請求無效，請再試',
-      'ja': 'ピクチャ・イン・ピクチャの要求が無効です。もう一度お試しください',
-      'en': 'The Picture in Picture request is invalid. Try again.',
-    },
-    'pip_prepare_timeout': {
-      'zh-Hans': '画中画准备超时，请稍后重试',
-      'zh-Hant': '子母畫面準備逾時，請稍後再試',
-      'ja': 'ピクチャ・イン・ピクチャの準備がタイムアウトしました',
-      'en': 'Preparing Picture in Picture timed out. Try again shortly.',
-    },
-    'pip_start_failed': {
-      'zh-Hans': '画中画启动失败，请重试',
-      'zh-Hant': '子母畫面啟動失敗，請再試',
-      'ja': 'ピクチャ・イン・ピクチャを開始できません。もう一度お試しください',
-      'en': 'Unable to start Picture in Picture. Try again.',
-    },
-    'pip_video_not_ready': {
-      'zh-Hans': '当前视频画面尚未就绪，请稍后重试',
-      'zh-Hant': '目前影片畫面尚未就緒，請稍後再試',
-      'ja': '動画表示の準備ができていません。少し待ってからお試しください',
-      'en': 'The video is not ready. Try again shortly.',
-    },
-    'pip_controller_failed': {
-      'zh-Hans': '无法创建系统画中画控制器',
-      'zh-Hant': '無法建立系統子母畫面控制器',
-      'ja': 'システムのピクチャ・イン・ピクチャ制御を作成できません',
-      'en': 'Unable to create the system Picture in Picture controller.',
-    },
-    'pip_temporarily_unavailable': {
-      'zh-Hans': '当前视频暂时无法进入画中画，请稍后重试',
-      'zh-Hant': '目前影片暫時無法進入子母畫面，請稍後再試',
-      'ja': 'この動画は現在ピクチャ・イン・ピクチャに切り替えられません',
-      'en': 'This video cannot enter Picture in Picture right now. Try again shortly.',
-    },
-    'pip_output_takeover_failed': {
-      'zh-Hans': '画中画未能安全接管视频输出，请重试播放',
-      'zh-Hant': '子母畫面未能安全接管影片輸出，請重試播放',
-      'ja': 'ピクチャ・イン・ピクチャが動画出力を安全に引き継げませんでした。再生を再試行してください',
-      'en': 'Picture in Picture could not safely take over video output. Retry playback.',
-    },
-    'pip_restore_failed': {
-      'zh-Hans': '画中画退出后视频画面恢复失败，请重新打开媒体',
-      'zh-Hant': '子母畫面結束後影片畫面恢復失敗，請重新開啟媒體',
-      'ja': 'ピクチャ・イン・ピクチャ終了後に動画表示を復元できませんでした。メディアを開き直してください',
-      'en': 'Video output could not be restored after Picture in Picture. Reopen the media.',
     },
     'purchase_service_unavailable': {
       'zh-Hans': '打赏服务暂不可用，请稍后重试',
@@ -929,34 +933,22 @@ class AppLocalizations {
       'en': 'Purchase failed. Try again later.',
     },
     'media_kit_open_failed': {
-      'zh-Hans': '兼容引擎打开失败，请重新打开媒体',
-      'zh-Hant': '相容引擎開啟失敗，請重新開啟媒體',
-      'ja': '互換エンジンでメディアを開けませんでした。開き直してください',
-      'en': 'The compatibility engine could not open the media. Reopen it.',
+      'zh-Hans': '兼容引擎无法打开此媒体',
+      'zh-Hant': '相容引擎無法開啟此媒體',
+      'ja': '互換エンジンでメディアを開けませんでした',
+      'en': 'The compatibility engine could not open the media.',
     },
     'media_kit_play_failed': {
-      'zh-Hans': '兼容引擎播放失败，请重新打开媒体',
-      'zh-Hant': '相容引擎播放失敗，請重新開啟媒體',
-      'ja': '互換エンジンで再生できませんでした。開き直してください',
-      'en': 'The compatibility engine could not play the media. Reopen it.',
+      'zh-Hans': '兼容引擎无法播放此媒体',
+      'zh-Hant': '相容引擎無法播放此媒體',
+      'ja': '互換エンジンで再生できませんでした',
+      'en': 'The compatibility engine could not play the media.',
     },
     'audio_interruption_ended': {
       'zh-Hans': '音频中断已结束，点击播放继续',
       'zh-Hant': '音訊中斷已結束，點選播放繼續',
       'ja': '音声の中断が終了しました。再生をタップして続けてください',
       'en': 'The audio interruption ended. Tap Play to continue.',
-    },
-    'pip_page_closed': {
-      'zh-Hans': '画中画准备期间播放页面已关闭，请重试播放',
-      'zh-Hant': '子母畫面準備期間播放頁面已關閉，請重試播放',
-      'ja': 'ピクチャ・イン・ピクチャの準備中に再生画面が閉じられました。再生を再試行してください',
-      'en': 'The playback page closed while Picture in Picture was preparing. Retry playback.',
-    },
-    'pip_start_failed_output_restored': {
-      'zh-Hans': '画中画未能启动，已重新连接视频输出',
-      'zh-Hant': '子母畫面未能啟動，已重新連接影片輸出',
-      'ja': 'ピクチャ・イン・ピクチャは開始できませんでしたが、動画出力は再接続されました',
-      'en': 'Picture in Picture did not start. Video output was reconnected.',
     },
     'timeline_adjustment_failed': {
       'zh-Hans': '无法保留媒体轨道，未调整时间轴',
@@ -1243,9 +1235,12 @@ class AppLocalizations {
     '开始计时': {'zh-Hant': '開始計時', 'ja': 'タイマーを開始', 'en': 'Start Timer'},
     '亮度': {'zh-Hant': '亮度', 'ja': '明るさ', 'en': 'Brightness'},
     '音量': {'zh-Hant': '音量', 'ja': '音量', 'en': 'Volume'},
-    '暂时无法播放': {'zh-Hant': '暫時無法播放', 'ja': '現在再生できません', 'en': 'Unable to Play'},
-    '重试播放': {'zh-Hant': '重試播放', 'ja': '再試行', 'en': 'Retry Playback'},
     '返回课程库': {'zh-Hant': '返回課程庫', 'ja': 'コースに戻る', 'en': 'Back to Library'},
+    '正在等待画中画结束': {
+      'zh-Hant': '正在等待子母畫面結束',
+      'ja': 'ピクチャ・イン・ピクチャの終了を待っています',
+      'en': 'Waiting for Picture in Picture to finish',
+    },
     '锁定控件': {'zh-Hant': '鎖定控制項', 'ja': 'コントロールをロック', 'en': 'Lock Controls'},
     '解锁控件': {'zh-Hant': '解鎖控制項', 'ja': 'ロックを解除', 'en': 'Unlock Controls'},
     '画中画': {

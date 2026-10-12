@@ -78,6 +78,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       case "open": timeoutSeconds = 16
       case "pip": timeoutSeconds = 20
       case "pipRestore": timeoutSeconds = 24
+      case "recoverDecoder": timeoutSeconds = 14
       case "seek": timeoutSeconds = 9
       case "release", "stop": timeoutSeconds = 5
       default: timeoutSeconds = 7
@@ -102,6 +103,16 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
       guard let self = self else { result(false); return }
       guard let arguments = call.arguments as? [String: Any] else {
         result(FlutterMethodNotImplemented); return
+      }
+      if call.method == "decoderRecoveryNeeded" {
+        guard let engineID = arguments["engineId"] as? String,
+              let version = arguments["positionVersion"] as? NSNumber,
+              arguments["reason"] as? String == "vt_session_failed_with_persistent_underrun" else {
+          result(false); return
+        }
+        self.playback.requestMediaKitDecoderRecovery(engineID: engineID,
+          positionVersion: version.intValue) { result($0) }
+        return
       }
       if call.method == "pipReady" {
         guard let requestID = arguments["requestId"] as? String,
@@ -147,7 +158,6 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
     }
     playback.changed = { [weak self] state in self?.sink?(["type": "player", "state": state]) }
     playback.restoreRequested = { [weak self] in self?.sink?(["type": "openPlayer"]) }
-    playback.notice = { [weak self] code in self?.sink?(["type": "notice", "code": code]) }
     library.recordStore.changed = { [weak self] in self?.publishRecords() }
   }
 
@@ -574,6 +584,16 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
           else { result(self.playback.snapshot()) }
         }; return
       case "restoreBrightness": playback.restoreBrightness()
+      case "playerDismissed":
+        pendingMediaKitPiPToken = nil; pendingMediaKitPiPSourceView = nil
+        pipRestoreCompletion?(false)
+        pipRestoreCompletion = nil; pipRestoreToken = nil; pipRestoreController = nil
+        playback.playerDismissed()
+      case "pipRestoreAllowed":
+        result(Self.matchesPiPRestoreToken(expected: pipRestoreToken,
+          received: args["restoreToken"] as? String)
+          && pipRestoreController.map { playback.allowsPiPRestore($0) } == true)
+        return
       case "pipRestored":
         if pipRestoreToken == nil, args["restoreToken"] == nil {
           // A normal, non-PiP openPlayer event has nothing to acknowledge.
@@ -581,12 +601,14 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         }
         guard Self.matchesPiPRestoreToken(expected: pipRestoreToken,
           received: args["restoreToken"] as? String) else {
-          result(failure(LibraryFailure.app("pip_restore_stale"))); return
+          playback.recordPiPFailure("stale restore request")
+          result(false); return
         }
         guard let controller = pipRestoreController, playback.allowsPiPRestore(controller) else {
           pipRestoreCompletion?(false)
           pipRestoreCompletion = nil; pipRestoreToken = nil; pipRestoreController = nil
-          result(failure(LibraryFailure.app("pip_restore_stale"))); return
+          playback.recordPiPFailure("stale restore request")
+          result(false); return
         }
         pipRestoreCompletion?(true)
         pipRestoreCompletion = nil
@@ -600,7 +622,8 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
           guard pendingMediaKitPiPSourceView?.window != nil else {
             pendingMediaKitPiPToken = nil
             pendingMediaKitPiPSourceView = nil
-            throw LibraryFailure.app("player_page_unavailable")
+            playback.recordPiPFailure("source page unavailable")
+            result(false); return
           }
           DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
             guard self?.pendingMediaKitPiPToken == pipToken else { return }
@@ -614,7 +637,10 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         } catch {
           pendingMediaKitPiPSourceView = nil
           pendingMediaKitPiPToken = nil
-          throw error
+          let code = (error as? LibraryFailure)?.code
+          if code == "pip_unsupported" || code == "pip_audio_unnecessary" { throw error }
+          playback.recordPiPFailure(code ?? error.localizedDescription)
+          result(false); return
         }
       default: result(FlutterMethodNotImplemented); return
       }
@@ -705,20 +731,23 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   }
 
   func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-    if playback.finishRetiringPiP(pictureInPictureController) { return }
+    playback.recordAVPlayerPiPEvent("delegate didStop", controller: pictureInPictureController)
+    if playback.finishRetiringPiP(pictureInPictureController, avTerminal: .didStop) { return }
     if playback.pip === pictureInPictureController {
-      playback.finishAVPlayerPiP(pictureInPictureController)
+      playback.finishAVPlayerPiP(pictureInPictureController, terminal: .didStop)
     } else if playback.ownsMediaKitPiP(pictureInPictureController) {
       playback.finishMediaKitPiP(pictureInPictureController)
     }
   }
 
   func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    playback.recordAVPlayerPiPEvent("delegate willStart", controller: pictureInPictureController)
     if playback.rejectRetiringPiPStart(pictureInPictureController) { return }
     _ = playback.rejectUnauthorizedAVPlayerPiPStart(pictureInPictureController)
   }
 
   func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+    playback.recordAVPlayerPiPEvent("delegate didStart", controller: pictureInPictureController)
     if playback.rejectRetiringPiPStart(pictureInPictureController) { return }
     if playback.pip === pictureInPictureController {
       playback.didStartAVPlayerPiP(pictureInPictureController)
@@ -726,15 +755,12 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
   }
 
   func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
-    if playback.finishRetiringPiP(pictureInPictureController) { return }
+    playback.recordAVPlayerPiPEvent("delegate failedToStart", controller: pictureInPictureController, error: error)
+    if playback.finishRetiringPiP(pictureInPictureController, avTerminal: .failedToStart) { return }
     guard playback.pip === pictureInPictureController || playback.ownsMediaKitPiP(pictureInPictureController) else { return }
-    sink?([
-      "type": "notice",
-      "code": "pip_start_failed",
-      "technicalDetail": error.localizedDescription,
-    ])
+    playback.recordPiPFailure(error.localizedDescription)
     if playback.pip === pictureInPictureController {
-      playback.finishAVPlayerPiP(pictureInPictureController)
+      playback.finishAVPlayerPiP(pictureInPictureController, terminal: .failedToStart)
     } else if playback.ownsMediaKitPiP(pictureInPictureController) {
       playback.finishMediaKitPiP(pictureInPictureController)
     }

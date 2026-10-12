@@ -193,6 +193,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   int tab = 0;
   String folder = '';
   bool playerVisible = false;
+  int playerNavigationEpoch = 0;
   int? settingsSwipePointer;
   Offset? settingsSwipeStart;
   Offset? settingsSwipePosition;
@@ -224,7 +225,11 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     m.addListener(changed);
-    m.onOpenPlayer = showPlayer;
+    // Only a current native PiP restoration can navigate automatically.
+    // Ordinary library/mini-player opens call showPlayer directly.
+    m.onOpenPlayer = (token) async {
+      if (token != null) await showPlayer(token);
+    };
     unawaited(m.initialize());
     developerTip.hostReady = () => mounted && Overlay.maybeOf(context) != null;
     developerTip.onLightDismiss = () {
@@ -323,22 +328,41 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     await m.command(
       'pipRestored',
       args: restoreToken == null ? null : {'restoreToken': restoreToken},
+      silent: true,
     );
   }
 
   Future<void> showPlayer([String? restoreToken]) async {
     if (!mounted || m.path.isEmpty) return;
+    final navigationEpoch = restoreToken == null
+        ? ++playerNavigationEpoch : playerNavigationEpoch;
+    if (restoreToken != null) {
+      final generation = m.state['generation'];
+      var allowed = false;
+      final checked = await m.command('pipRestoreAllowed',
+        args: {'restoreToken': restoreToken}, silent: true,
+        onValue: (value) => allowed = value == true);
+      if (!checked || !allowed || !mounted ||
+          navigationEpoch != playerNavigationEpoch ||
+          generation != m.state['generation']) return;
+    }
     if (playerVisible) {
       await acknowledgePiPRestore(restoreToken);
       return;
     }
     playerVisible = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) unawaited(acknowledgePiPRestore(restoreToken));
+      if (mounted && playerVisible && navigationEpoch == playerNavigationEpoch) {
+        unawaited(acknowledgePiPRestore(restoreToken));
+      }
     });
-    await Navigator.of(context)
-        .push(MaterialPageRoute<void>(builder: (_) => PlaybackPage(model: m)));
-    playerVisible = false;
+    try {
+      await Navigator.of(context)
+          .push(MaterialPageRoute<void>(builder: (_) => PlaybackPage(model: m)));
+    } finally {
+      playerNavigationEpoch++;
+      playerVisible = false;
+    }
   }
 
   List<MediaEntry> get visible {
@@ -403,6 +427,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       await info(entry);
       return;
     }
+    playerNavigationEpoch++;
     final files =
         m.entries
             .where((e) => e.isPlayable && e.parent == entry.parent)
@@ -1596,7 +1621,8 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                 const SizedBox(height: 18),
                 if (progress == null)
                   LText(
-                    current && m.loading ? '正在加载' : '播放进度暂不可用',
+                    current && m.presentationWaiting ? '正在等待画中画结束'
+                      : current && m.loading ? '正在加载' : '播放进度暂不可用',
                     style: Theme.of(context).textTheme.bodySmall,
                   )
                 else ...[
@@ -1631,13 +1657,13 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                   children: [
                     Expanded(
                       child: LeiGlassButton(
-                        label: current && (m.playing || m.loading)
+                        label: current && (m.transportShowsPause || m.presentationWaiting)
                             ? '返回播放'
                             : '继续播放',
                         icon: Icons.play_arrow_rounded,
                         onPressed: () async {
                           if (current) {
-                            if (!m.playing && !m.loading) await m.toggle();
+                            if (!m.transportShowsPause && !m.presentationWaiting) await m.toggle();
                             if (mounted) await showPlayer();
                           } else {
                             await open(entry);
@@ -1645,7 +1671,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                         },
                       ),
                     ),
-                    if (current && (m.playing || m.loading)) ...[
+                    if (current && m.transportShowsPause) ...[
                       const SizedBox(width: 10),
                       LeiGlassIconButton(
                         icon: const Icon(Icons.pause_rounded),

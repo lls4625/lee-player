@@ -1,0 +1,9 @@
+{
+  "  Future<void> setProperty(": "62e2fbc056325b7ff39f4dbd774f8868025e95c1fe19cfe440fa6c425bff7b3d",
+  "  Future<String> getProperty(": "0896ae1d482939869f080b7ac8180b45ae0925b5b2fa76bd83b342934b558c79",
+  "  Future<void> observeProperty(": "5012b7bb70fbaeba1d1bd0ee523d33a2fba71133df5406c1474b65a9af81badb",
+  "  Future<void> unobserveProperty(": "5320683f35b27a6d0f3f8106eb5fd2589e9bd459b0f1405014797a1201b3ae09",
+  "  Future<void> command(": "918a34c9e65ba4a8fabc0a64b7d0dae5e806bf76ce4cc72c70e7abcf9a5bdf5c",
+  "  Future<void> _setProperty(": "60e5af6848b806437da2f20bc4ba5067d4fffa03d15ff1e3e67ddfc8a93ef6c2",
+  "  Future<void> _command(": "6317ac8e99018f6e1560137ca59ac58ea804bd5221b1146097349d240f3694db"
+}

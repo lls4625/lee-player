@@ -1,7 +1,7 @@
 name: leeplayer
 description: "Local course video player for iOS."
 publish_to: 'none'
-version: 3.0.0+12
+version: 3.0.0+13
 
 environment:
   sdk: ^3.13.2
@@ -20,9 +20,16 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
 
+# Fixed 1.2.6 source plus the additive async-get patch. The override also
+# applies to media_kit_video's hosted constraint; no global pub-cache edits.
+dependency_overrides:
+  media_kit:
+    path: third_party/media_kit
+
 flutter:
   uses-material-design: true
   assets:
+    - assets/fonts/NotoSansCJKsc-Regular.otf
     - assets/legal/PRIVACY_POLICY.txt
     - assets/legal/COPYRIGHT_NOTICE.txt
     - assets/legal/LIQUID_GLASS_WIDGETS_LICENSE.txt

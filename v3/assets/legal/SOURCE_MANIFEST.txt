@@ -62,3 +62,11 @@ Patch SHA-256 bad558070e0a82faa5c0ae553bcd12d49021fc4b628f232a8e58c3fbd281aae1
 二进制归档
 https://github.com/media-kit/libmpv-darwin-build/releases/download/v0.6.0/libmpv-xcframeworks_v0.6.0_ios-universal-video-default.tar.gz
 SHA-256 a95bc18508af26136b8a408341c05b5585d644ec013f00ac07db09d2e28d36ae
+
+字幕后备字体（独立随包资源，不属于上述原生二进制归档）
+Noto Sans CJK SC Regular 2.004；原版单字重 OTF，SIL Open Font License 1.1。
+字体内置版权声明：© 2014-2021 Adobe (http://www.adobe.com/).
+https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf
+SHA-256 2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b
+许可：https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/LICENSE
+完整许可同时随 App 提供并登记到开源许可页。

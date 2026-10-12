@@ -66,6 +66,276 @@ void main() {
           .setMockMethodCallHandler(methods, null);
     });
 
+    test('new file selection does not wait for a pending PiP command', () async {
+      final pip = Completer<Object?>();
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(methods, (call) async {
+        if (call.method == 'pip') return pip.future;
+        if (call.method == 'open') return {
+          'path': 'next.mp4', 'generation': 2, 'loading': true,
+          'playing': false, 'error': '',
+        };
+        return null;
+      });
+      final model = PlayerModel()..state = {
+        'path': 'broken.mp4', 'generation': 1, 'error': 'media_playback_failed',
+      };
+      addTearDown(model.dispose);
+      final requesting = model.command('pip');
+      expect(await model.openPaths(['next.mp4'], 0), isTrue);
+      expect(pip.isCompleted, isFalse);
+      expect(model.path, 'next.mp4');
+      // Accepted selection is not proof that cleanup/opening/decoding finished.
+      expect(model.loading, isTrue);
+      expect(model.playing, isFalse);
+      expect(model.state['error'], isEmpty);
+      pip.complete(null);
+      expect(await requesting, isTrue);
+    });
+
+    test('latest selected file wins over an earlier delayed open failure state', () async {
+      final earlier = Completer<Object?>();
+      var opens = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(methods, (call) async {
+        if (call.method != 'open') return null;
+        if (++opens == 1) return earlier.future;
+        return {'path': 'next.mp4', 'generation': 2, 'error': '', 'playing': true};
+      });
+      final model = PlayerModel();
+      addTearDown(model.dispose);
+      final first = model.openPaths(['broken.mp4'], 0);
+      expect(await model.openPaths(['next.mp4'], 0), isTrue);
+      earlier.complete({'path': 'broken.mp4', 'generation': 1,
+        'error': 'media_playback_failed', 'playing': false});
+      expect(await first, isFalse);
+      expect(model.path, 'next.mp4');
+      expect(model.playing, isTrue);
+      expect(model.state['error'], isEmpty);
+    });
+
+    test('a declined PiP transaction does not replace media state with a prompt', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(methods, (_) async => false);
+      final model = PlayerModel()..state = {
+        'path': 'test.mp4', 'generation': 1, 'playing': true, 'error': '',
+      };
+      addTearDown(model.dispose);
+      await model.command('pip');
+      expect(model.message, isNull);
+      expect(model.playing, isTrue);
+      expect(model.state['error'], isEmpty);
+    });
+
+    test('terminal and unrecognized playback failures remain visible state', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(methods, (_) async {
+        throw PlatformException(code: 'media_playback_failed');
+      });
+      final model = PlayerModel()..state = {
+        'path': 'test.mp4', 'error': 'media_playback_failed', 'playing': false,
+      };
+      addTearDown(model.dispose);
+      expect(await model.command('open'), isFalse);
+      expect(model.message?.code, 'media_playback_failed');
+      expect(model.playbackIssue?.code, 'media_playback_failed');
+      expect(model.playing, isFalse);
+      model.state = {'error': 'new_unrecognized_failure'};
+      expect(model.playbackIssue?.code, 'new_unrecognized_failure');
+    });
+
+    for (final loading in [false, true]) {
+      test('${loading ? 'loading' : 'pending automatic recovery'} keeps a cancel action', () async {
+        final calls = <String>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(methods, (call) async {
+          calls.add(call.method);
+          return {'generation': 1, 'playing': false, 'loading': false,
+            'wantsPlayback': false, 'audioRecovery': 'idle'};
+        });
+        final model = PlayerModel()..state = {
+          'generation': 1, 'playing': false, 'loading': loading,
+          // A loading button still cancels even if native intent has changed.
+          'wantsPlayback': !loading, 'audioRecovery': loading ? 'idle' : 'pending',
+        };
+        addTearDown(model.dispose);
+        expect(model.transportShowsPause, isTrue);
+        expect(await model.toggle(), isTrue);
+        expect(calls, ['pause']);
+        expect(model.transportShowsPause, isFalse);
+      });
+    }
+
+    for (final wantsPlayback in [false, true]) {
+      test('presentation wait cancels with pause when native intent is $wantsPlayback', () async {
+        final calls = <String>[];
+        final model = PlayerModel()..state = {
+          'generation': 1, 'revision': 1, 'presentationWaiting': true,
+          'playing': false, 'loading': false, 'wantsPlayback': wantsPlayback,
+        };
+        addTearDown(model.dispose);
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(methods, (call) async {
+          calls.add(call.method);
+          return {...model.state, 'revision': calls.length + 1,
+            'playing': false, 'wantsPlayback': false};
+        });
+        for (var tap = 0; tap < 3; tap++) {
+          expect(model.transportShowsPause, isTrue);
+          expect(await model.toggle(), isTrue);
+        }
+        expect(calls, ['pause', 'pause', 'pause']);
+        expect(model.state['wantsPlayback'], isFalse);
+        // A later native ownership release does not create a new Play intent.
+        model.state = {...model.state, 'presentationWaiting': false};
+        expect(model.transportShowsPause, isFalse);
+        expect(calls.where((call) => call == 'play'), isEmpty);
+      });
+    }
+
+    for (final lateFailure in [false, true]) {
+      test('waiting cancellation bypasses pending play and rejects its late ${lateFailure ? 'error' : 'state'}', () async {
+        final playReply = Completer<Object?>();
+        final calls = <String>[];
+        final model = PlayerModel()..state = {
+          'generation': 1, 'revision': 1, 'path': 'current.mp4',
+          'playing': false, 'wantsPlayback': false,
+        };
+        addTearDown(model.dispose);
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(methods, (call) async {
+          calls.add(call.method);
+          if (call.method == 'play') return playReply.future;
+          return {...model.state, 'revision': 3,
+            'playing': false, 'wantsPlayback': false};
+        });
+        final oldPlay = model.toggle();
+        await Future<void>.delayed(Duration.zero);
+        model.state = {...model.state, 'revision': 2,
+          'presentationWaiting': true, 'wantsPlayback': true};
+        final cancel = model.toggle();
+        await Future<void>.delayed(Duration.zero);
+        // Pause must be sent while the old Play reply is still unresolved.
+        expect(calls, ['play', 'pause']);
+        expect(await cancel, isTrue);
+        expect(playReply.isCompleted, isFalse);
+        if (lateFailure) {
+          playReply.completeError(PlatformException(code: 'media_playback_failed'));
+        } else {
+          playReply.complete({'generation': 1, 'revision': 99,
+            'path': 'current.mp4', 'presentationWaiting': false,
+            'playing': true, 'wantsPlayback': true});
+        }
+        expect(await oldPlay, isFalse);
+        expect(model.state['revision'], 3);
+        expect(model.presentationWaiting, isTrue);
+        expect(model.playing, isFalse);
+        expect(model.state['wantsPlayback'], isFalse);
+        expect(model.message, isNull);
+      });
+    }
+
+    test('waiting cancellation makes a pending play timeout stale', () async {
+      final playReply = Completer<Object?>();
+      final model = PlayerModel(commandTimeouts: {
+        'play': const Duration(milliseconds: 30),
+      })..state = {'generation': 1, 'revision': 1,
+        'playing': false, 'wantsPlayback': false};
+      addTearDown(model.dispose);
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(methods, (call) async {
+        if (call.method == 'play') return playReply.future;
+        return {...model.state, 'revision': 3,
+          'playing': false, 'wantsPlayback': false};
+      });
+      final oldPlay = model.toggle();
+      model.state = {...model.state, 'presentationWaiting': true};
+      expect(await model.toggle(), isTrue);
+      expect(await oldPlay, isFalse);
+      expect(model.message, isNull);
+      expect(model.state['wantsPlayback'], isFalse);
+      playReply.complete(null);
+    });
+
+    test('late wait-cancellation reply cannot roll back a newer session', () async {
+      final pauseReply = Completer<Object?>();
+      final calls = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(methods, (call) async {
+        calls.add(call.method);
+        if (call.method == 'pause') return pauseReply.future;
+        return {'generation': 2, 'revision': 1, 'path': 'new.mkv',
+          'playing': true, 'wantsPlayback': true, 'presentationWaiting': false};
+      });
+      final model = PlayerModel()..state = {
+        'generation': 1, 'revision': 1, 'path': 'old.mp4',
+        'presentationWaiting': true, 'playing': false, 'wantsPlayback': true,
+      };
+      addTearDown(model.dispose);
+      final cancelled = model.toggle();
+      expect(await model.openPaths(['new.mkv'], 0), isTrue);
+      pauseReply.complete({'generation': 1, 'revision': 99, 'path': 'old.mp4',
+        'presentationWaiting': true, 'playing': false, 'wantsPlayback': false});
+      await cancelled;
+      expect(calls, ['pause', 'open']);
+      expect(model.path, 'new.mkv');
+      expect(model.state['generation'], 2);
+      expect(model.state['revision'], 1);
+      expect(model.playing, isTrue);
+      expect(model.presentationWaiting, isFalse);
+    });
+
+    for (final taps in [2, 3]) {
+      test('$taps rapid toggles preserve the latest requested intent', () async {
+        final firstReply = Completer<Object?>();
+        final calls = <String>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(methods, (call) async {
+          calls.add(call.method);
+          if (calls.length == 1) return firstReply.future;
+          return {'generation': 1, 'playing': call.method == 'play',
+            'wantsPlayback': call.method == 'play', 'loading': false};
+        });
+        final model = PlayerModel()..state = {
+          'generation': 1, 'playing': false, 'loading': false, 'wantsPlayback': false,
+        };
+        addTearDown(model.dispose);
+        final pending = [for (var i = 0; i < taps; i++) model.toggle()];
+        expect(model.transportShowsPause, taps.isOdd);
+        firstReply.complete({'generation': 1, 'playing': true,
+          'wantsPlayback': true, 'loading': false});
+        expect(await Future.wait(pending), everyElement(isTrue));
+        expect(calls, taps.isEven ? ['play', 'pause'] : ['play']);
+        expect(model.playing, taps.isOdd);
+        expect(model.transportShowsPause, taps.isOdd);
+      });
+    }
+
+    test('an old pending toggle cannot control the newly selected session', () async {
+      final oldReply = Completer<Object?>();
+      var calls = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(methods, (call) async {
+        if (++calls == 1) return oldReply.future;
+        return {'generation': 2, 'path': 'new.mp4', 'playing': true,
+          'wantsPlayback': true, 'loading': false};
+      });
+      final model = PlayerModel()..state = {
+        'generation': 1, 'path': 'old.mp4', 'playing': false, 'wantsPlayback': false,
+      };
+      addTearDown(model.dispose);
+      final old = model.toggle();
+      model.state = {'generation': 2, 'path': 'new.mp4', 'playing': false,
+        'wantsPlayback': false, 'loading': false};
+      expect(model.transportShowsPause, isFalse);
+      expect(await model.toggle(), isTrue);
+      oldReply.complete({'generation': 1, 'path': 'old.mp4', 'playing': true});
+      expect(await old, isFalse);
+      expect(calls, 2);
+      expect(model.path, 'new.mp4');
+      expect(model.transportShowsPause, isTrue);
+    });
+
     test(
       'sends the natural-order queue and selected index when opening',
       () async {

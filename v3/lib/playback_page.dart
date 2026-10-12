@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/cupertino.dart' show CupertinoThemeData;
+import 'package:flutter/cupertino.dart' show CupertinoTheme, CupertinoThemeData;
 import 'package:flutter/services.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'player_model.dart';
@@ -351,6 +351,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
   }
   final videoKey = GlobalKey();
   bool locked = false, controlsVisible = true, rotating = false;
+  bool dismissed = false;
   bool pipCommandPending = false;
   static const modes = {'sequence': '顺序播放', 'folder': '文件夹循环', 'one': '单集循环', 'shuffle': '随机播放'};
   @override
@@ -398,6 +399,14 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (locked) scheduleLockButtonHide();
   }
 
+  void dismissPlayer() {
+    if (dismissed) return;
+    dismissed = true;
+    // Fence pending restoration as soon as navigation pops, rather than after
+    // its animation. Audio/active manual PiP remain owned by the native service.
+    unawaited(m.command('playerDismissed', silent: true));
+  }
+
   @override
   void dispose() {
     feedbackTimer?.cancel();
@@ -407,7 +416,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
     lockButtonTimer?.cancel();
     if (dragging != null && !endingDrag) m.cancelScrub();
     m.removeListener(changed);
-    m.command('restoreBrightness');
+    dismissPlayer();
     unawaited(SystemChrome.setPreferredOrientations(playbackExitOrientations)
       .catchError((Object _) {}));
     super.dispose();
@@ -611,7 +620,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
       showLeiToast(context, '课程已切换，请重新打开队列');
       return;
     }
-    if (selected != selectedIndex) await m.command('open', args: {'paths': paths, 'index': selected, 'resume': true});
+    if (selected != selectedIndex) await m.openPaths(paths, selected);
   }
   Future<void> speed() async {
     var ticks = (m.number('rate', 1) * 20).round().clamp(10, 60);
@@ -694,30 +703,104 @@ class _PlaybackPageState extends State<PlaybackPage> {
     final text = info == null
       ? localizations.text(legacyText!)
       : localizations.playbackInfo(info!);
-    await showLeiDialog<void>(context: context, title: null, platformViewBackdrop: true,
-      content: Column(mainAxisSize: MainAxisSize.min, children: [
-        Row(children: [
-          const SizedBox(width: 44),
-          Expanded(child: Semantics(header: true, child: LText('播放信息',
-            textAlign: TextAlign.center, style: Theme.of(context).textTheme.titleLarge))),
-          GlassIconButton(icon: const Icon(Icons.close_rounded),
-            onPressed: () => Navigator.of(context, rootNavigator: true).pop(),
-            platformViewBackdrop: true,
-            semanticLabel: AppLocalizations.of(context).text('关闭播放信息')),
-        ]),
-        const SizedBox(height: 8),
-        SingleChildScrollView(child: SelectableText(text)),
-      ]),
-      actions: [
-        GlassDialogAction(label: '复制信息', onPressed: () async {
-          try {
-            await Clipboard.setData(ClipboardData(text: text));
-          } catch (_) {
-            if (mounted) showLeiToast(context, '复制失败，请重试');
-          }
-        }),
-        GlassDialogAction(label: '关闭', onPressed: () => Navigator.of(context, rootNavigator: true).pop()),
-      ]);
+    // showDialog captures inherited Material themes. CupertinoTheme must also
+    // follow the playback caller, as it does in showLeiDialog.
+    final theme = Theme.of(context);
+    final cupertinoTheme = theme.cupertinoOverrideTheme == null
+      ? CupertinoTheme.of(context)
+      : MaterialBasedCupertinoThemeData(materialTheme: theme);
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black54,
+      animationStyle: const AnimationStyle(
+        duration: Duration(milliseconds: 200),
+        reverseDuration: Duration(milliseconds: 200),
+        curve: Curves.linear,
+        reverseCurve: Curves.linear,
+      ),
+      builder: (dialogContext) {
+        void close() => Navigator.of(dialogContext, rootNavigator: true).pop();
+        return CupertinoTheme(
+          data: cupertinoTheme,
+          child: DefaultTextStyle(
+            style: theme.textTheme.bodyMedium!,
+            child: Dialog(
+              backgroundColor: Colors.transparent,
+              elevation: 0,
+              insetPadding: const EdgeInsets.all(24),
+              insetAnimationDuration: const Duration(milliseconds: 180),
+              insetAnimationCurve: Curves.linear,
+              constraints: const BoxConstraints(maxWidth: 280),
+              child: GlassContainer(
+                useOwnLayer: true,
+                quality: GlassQuality.minimal,
+                platformViewBackdrop: true,
+                padding: const EdgeInsets.all(20),
+                shape: const LiquidRoundedSuperellipse(borderRadius: 12),
+                child: AdaptiveLiquidGlassLayer(
+                  quality: GlassQuality.minimal,
+                  platformViewBackdrop: true,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Keep the actions outside the only scrolling region. Even
+                      // a very long diagnostic report can be copied immediately.
+                      Row(children: [
+                        Expanded(child: GlassButton.custom(
+                          onTap: () async {
+                            try {
+                              await Clipboard.setData(ClipboardData(text: text));
+                            } catch (_) {
+                              if (mounted) showLeiToast(context, '复制失败，请重试');
+                            }
+                          },
+                          key: const ValueKey('playback-info-copy'),
+                          label: localizations.text('复制信息'),
+                          height: 48,
+                          shape: leiRoundedControlShape,
+                          platformViewBackdrop: true,
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 8),
+                            child: FittedBox(fit: BoxFit.scaleDown,
+                              child: LText('复制信息', textAlign: TextAlign.center)),
+                          ),
+                        )),
+                        const SizedBox(width: 8),
+                        GlassIconButton(
+                          icon: const Icon(Icons.close_rounded),
+                          onPressed: close,
+                          platformViewBackdrop: true,
+                          semanticLabel: localizations.text('关闭播放信息'),
+                        ),
+                      ]),
+                      const SizedBox(height: 8),
+                      Flexible(child: SingleChildScrollView(
+                        key: const ValueKey('playback-info-scroll'),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Semantics(header: true, child: LText('播放信息',
+                              textAlign: TextAlign.center,
+                              style: Theme.of(dialogContext).textTheme.titleLarge)),
+                            const SizedBox(height: 8),
+                            SelectableText(text),
+                          ],
+                        ),
+                      )),
+                      const SizedBox(height: 12),
+                      LeiGlassButton(label: '关闭', onPressed: close),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
   Future<void> tracks() async {
     final generation = m.state['generation'];
@@ -961,8 +1044,10 @@ class _PlaybackPageState extends State<PlaybackPage> {
         action: canSeek && !jumping && dragging == null
           ? () => jump(-rewindSeconds.toDouble()) : null),
       LeiGlassIconButton(
-        icon: Icon(m.playing || m.loading ? Icons.pause_rounded : Icons.play_arrow_rounded),
-        tooltip: m.loading ? '取消加载' : m.playing ? '暂停' : '播放', platformViewBackdrop: true, onPressed: m.toggle),
+        icon: Icon(m.transportShowsPause ? Icons.pause_rounded : Icons.play_arrow_rounded),
+        tooltip: m.presentationWaiting ? '暂停'
+          : !m.transportShowsPause ? '播放' : m.loading ? '取消加载' : '暂停',
+        platformViewBackdrop: true, onPressed: m.toggle),
       seekButton(rewind: false, seconds: forwardSeconds,
         action: canSeek && !jumping && dragging == null
           ? () => jump(forwardSeconds.toDouble()) : null),
@@ -1002,27 +1087,6 @@ class _PlaybackPageState extends State<PlaybackPage> {
     const SizedBox(height: 12),
     transportBar(context),
   ]);
-
-  Widget errorPanel(BuildContext context) => Positioned.fill(
-    child: ColoredBox(color: const Color(0xee101114),
-      child: Center(child: SingleChildScrollView(padding: const EdgeInsets.all(24),
-        child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 420),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const LeiMediaIcon(icon: Icons.error_outline_rounded),
-            const SizedBox(height: 16),
-            LText('暂时无法播放', style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 12),
-            SelectableText(AppLocalizations.of(context).message(AppMessage('${m.state['error']}')),
-              textAlign: TextAlign.center),
-            const SizedBox(height: 20),
-            Wrap(spacing: 12, runSpacing: 12, alignment: WrapAlignment.center, children: [
-              LeiGlassButton(label: '重试播放', icon: Icons.refresh,
-                onPressed: m.loading ? null : () => m.command('play')),
-              LeiGlassButton(label: '返回课程库', icon: Icons.arrow_back,
-                onPressed: () => Navigator.of(context).pop()),
-              LeiGlassButton(label: '播放信息', icon: Icons.info_outline, onPressed: () => playbackInfo(context)),
-            ]),
-          ]))))));
 
   Widget videoContent(BuildContext context) => Stack(fit: StackFit.expand, children: [
     ColoredBox(color: Colors.black,
@@ -1114,7 +1178,8 @@ class _PlaybackPageState extends State<PlaybackPage> {
                 ? const SizedBox(width: 20, height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2))
                 : const Icon(Icons.picture_in_picture_alt),
-              '画中画', pipCommandPending || m.state['pipRequesting'] == true ? null : requestPiP),
+              '画中画', pipCommandPending || m.state['pipRequesting'] == true ||
+                m.presentationWaiting ? null : requestPiP),
             const SizedBox(width: 12, height: 12),
           ],
           playbackButton(const Icon(Icons.screen_rotation), '横竖屏', rotating ? null : rotate),
@@ -1125,12 +1190,16 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (controlsVisible && !locked) Positioned(left: 16, right: 16, bottom: 12,
       child: Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 760),
       child: Column(mainAxisSize: MainAxisSize.min, children: [
-        if (m.state['interrupted'] == true || m.state['detectingIntro'] == true)
+        if (m.playbackIssue != null || m.presentationWaiting ||
+            m.state['interrupted'] == true || m.state['detectingIntro'] == true)
           Padding(padding: const EdgeInsets.only(bottom: 8),
-            child: LText(m.state['interrupted'] == true ? '音频中断中，等待通话结束…' : '正在识别空白片头…')),
+            child: LText(m.playbackIssue != null
+              ? AppLocalizations.of(context).message(m.playbackIssue!)
+              : m.presentationWaiting ? '正在等待画中画结束'
+              : m.state['interrupted'] == true ? '音频中断中，等待通话结束…' : '正在识别空白片头…',
+              maxLines: 2, overflow: TextOverflow.ellipsis)),
         progressBar(context),
       ])))),
-    if (!locked && (m.state['error'] as String? ?? '').isNotEmpty) errorPanel(context),
   ]);
 
   @override
@@ -1141,7 +1210,9 @@ class _PlaybackPageState extends State<PlaybackPage> {
     child: Builder(builder: (context) => DefaultTextStyle(
       style: Theme.of(context).textTheme.bodyMedium!,
       child: IconTheme(data: const IconThemeData(color: Colors.white),
-        child: PopScope(canPop: !locked, child: GlassScaffold(
+        child: PopScope(canPop: !locked,
+          onPopInvokedWithResult: (didPop, _) { if (didPop) dismissPlayer(); },
+          child: GlassScaffold(
           background: const ColoredBox(color: Colors.black),
           themeOverride: GlassThemeData.simple(quality: GlassQuality.minimal),
           enableBackgroundSampling: false,

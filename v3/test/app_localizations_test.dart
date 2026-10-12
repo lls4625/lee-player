@@ -73,6 +73,23 @@ void main() {
     );
   });
 
+  test('playback diagnostics preserve the real error in all four languages', () {
+    for (final locale in AppLocalizations.supportedLocales) {
+      final strings = AppLocalizations(locale);
+      final text = strings.playbackInfo({
+        'engine': 'AVPlayer', 'errorCode': 'media_playback_failed',
+        'technicalDetail': 'Decoder detail',
+      });
+      expect(text, contains(strings.message(const AppMessage('media_playback_failed'))));
+      expect(text, isNot(contains('media_playback_failed')));
+      expect(text, contains('Decoder detail'));
+      expect(strings.playbackInfo({'engine': 'AVPlayer', 'errorCode': ''}),
+          isNot(contains('media_playback_failed')));
+      expect(strings.playbackInfo({'presentationWaiting': true}),
+          contains(strings.text('正在等待画中画结束')));
+    }
+  });
+
   test('manual language selection persists and a new model reloads it', () async {
     const channel = MethodChannel('lei.player/methods');
     var stored = 'system';

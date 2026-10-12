@@ -5,6 +5,7 @@ const liquidGlassWidgetsLicenseAsset =
     'assets/legal/LIQUID_GLASS_WIDGETS_LICENSE.txt';
 
 const _nativeLicenseAssets = <String, List<String>>{
+  'assets/legal/licenses/NotoSansCJK-OFL.txt': ['Noto Sans CJK SC 2.004'],
   'assets/legal/licenses/media_kit-MIT.txt': ['media_kit 1.2.6'],
   'assets/legal/licenses/media_kit_video-MIT.txt': ['media_kit_video 2.0.1'],
   'assets/legal/licenses/media_kit_libs_video-LICENSE.txt': [

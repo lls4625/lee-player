@@ -1,0 +1,10 @@
+# Vendored runtime uses the application's dependency graph. Upstream test/lints
+# are package-development dependencies, not LeePlayer dependencies. Keep the
+# unmodified upstream tests for provenance; do not claim they were executed.
+analyzer:
+  exclude:
+    - test/**
+    - example/**
+  errors:
+    unintended_html_in_doc_comment: ignore
+    dangling_library_doc_comments: ignore

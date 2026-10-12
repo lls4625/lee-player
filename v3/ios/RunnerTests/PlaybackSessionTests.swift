@@ -1,5 +1,6 @@
 import XCTest
 import AVFoundation
+import AVKit
 import UIKit
 @testable import Runner
 
@@ -10,6 +11,10 @@ private final class PlaybackTestTransport {
   var commands: [String] = []
   var holdSeeks = false
   var holdSubtitles = false
+  var holdDecoderRecovery = false
+  var holdPlays = false
+  var plays: [(Bool) -> Void] = []
+  var decoderRecoveries: [(Bool) -> Void] = []
   var seeks: [(seconds: Double, finish: (Bool) -> Void)] = []
   var subtitles: [(Bool) -> Void] = []
 
@@ -17,8 +22,12 @@ private final class PlaybackTestTransport {
     commands.append(method)
     if let id = arguments["engineId"] as? String, let version = arguments["positionVersion"] as? Int { versions[id] = version }
     if method == "seek" { requestedSeeks.append(arguments["seconds"] as? Double ?? -1) }
-    if method == "seek", holdSeeks {
+    if method == "play", holdPlays {
+      plays.append(finish)
+    } else if method == "seek", holdSeeks {
       seeks.append((arguments["seconds"] as? Double ?? -1, finish))
+    } else if method == "recoverDecoder", holdDecoderRecovery {
+      decoderRecoveries.append(finish)
     } else if method == "subtitle", holdSubtitles {
       subtitles.append(finish)
     } else {
@@ -41,7 +50,7 @@ final class PlaybackSessionTests: XCTestCase {
   private var library: CourseLibrary!
   private var testTransport: PlaybackTestTransport!
   private var savedDefaults: [String: Any] = [:]
-  private let preferenceKeys = ["playback.rememberProgress", "playback.smartIntro", "playback.continuous", "playback.background"]
+  private let preferenceKeys = ["playback.rememberProgress", "playback.smartIntro", "playback.continuous", "playback.background", "playback.resume"]
 
   override func setUpWithError() throws {
     for key in preferenceKeys {
@@ -51,6 +60,7 @@ final class PlaybackSessionTests: XCTestCase {
     UserDefaults.standard.set(false, forKey: "playback.smartIntro")
     UserDefaults.standard.set(false, forKey: "playback.continuous")
     UserDefaults.standard.set(true, forKey: "playback.background")
+    UserDefaults.standard.set(true, forKey: "playback.resume")
     temporary = FileManager.default.temporaryDirectory
       .appendingPathComponent("LeiPlayerPlaybackTests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -63,6 +73,149 @@ final class PlaybackSessionTests: XCTestCase {
     }
     savedDefaults.removeAll()
     try? FileManager.default.removeItem(at: temporary)
+  }
+
+  func testReturningToLibraryKeepsHealthyMediaAndPlaybackIntent() throws {
+    let transport = PlaybackTestTransport()
+    let service = try makeService(transport)
+    NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+    service.play()
+    let before = service.snapshot()
+    let commandCount = transport.commands.count
+    service.playerDismissed()
+    XCTAssertEqual(service.mediaKitEngineId, before["engineId"] as? String)
+    XCTAssertEqual(service.snapshot()["generation"] as? Int, before["generation"] as? Int)
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, true)
+    XCTAssertEqual(service.snapshot()["error"] as? String, "")
+    XCTAssertEqual(transport.commands.count, commandCount)
+  }
+
+  func testOldRejectedPlayCannotPauseTheLatestPlayIntent() throws {
+    let transport = PlaybackTestTransport()
+    let service = try makeService(transport)
+    transport.holdPlays = true
+    service.play(); service.pause(); service.play()
+    XCTAssertEqual(transport.plays.count, 2)
+    let before = transport.commands
+    try XCTUnwrap(transport.plays.first)(false)
+    drainMainQueue()
+    XCTAssertEqual(transport.commands, before)
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, true)
+    XCTAssertEqual(service.snapshot()["audioRecovery"] as? String, "idle")
+    try XCTUnwrap(transport.plays.last)(true)
+    drainMainQueue()
+    XCTAssertEqual(service.snapshot()["audioRecovery"] as? String, "idle")
+    service.pause()
+  }
+
+  func testOldSuccessfulPlayCannotCancelTheLatestRejectedPlayRecovery() throws {
+    let transport = PlaybackTestTransport()
+    let service = try makeService(transport)
+    transport.holdPlays = true
+    service.play(); service.pause(); service.play()
+    XCTAssertEqual(transport.plays.count, 2)
+    try XCTUnwrap(transport.plays.last)(false)
+    try XCTUnwrap(transport.plays.first)(true)
+    drainMainQueue()
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, true)
+    XCTAssertEqual(service.snapshot()["audioRecovery"] as? String, "pending")
+    service.pause()
+  }
+
+  func testOldRejectedPlayCannotIssueRecoveryCommandsDuringNewSeek() throws {
+    let transport = PlaybackTestTransport()
+    let service = try makeService(transport)
+    transport.holdPlays = true; transport.holdSeeks = true
+    service.play(); service.seek(30); service.play()
+    let before = transport.commands
+    try XCTUnwrap(transport.plays.first)(false)
+    drainMainQueue()
+    XCTAssertEqual(transport.commands, before)
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, true)
+    XCTAssertEqual(service.snapshot()["audioRecovery"] as? String, "idle")
+    service.pause()
+  }
+
+  func testRecoverablePiPFailureIsDiagnosticOnlyAndDoesNotPoisonMedia() throws {
+    let service = try makeService(PlaybackTestTransport())
+    let before = service.snapshot()
+    service.recordPiPFailure("delayed system stop")
+    XCTAssertEqual(service.snapshot()["generation"] as? Int, before["generation"] as? Int)
+    XCTAssertEqual(service.snapshot()["seekable"] as? Bool, before["seekable"] as? Bool)
+    XCTAssertEqual(service.snapshot()["error"] as? String, "")
+    XCTAssertEqual(service.playbackInfo()["errorCode"] as? String, "")
+    XCTAssertEqual(service.playbackInfo()["technicalDetail"] as? String, "PiP: delayed system stop")
+  }
+
+  private func postInterruption(_ type: AVAudioSession.InterruptionType,
+                                shouldResume: Bool = false) {
+    NotificationCenter.default.post(name: AVAudioSession.interruptionNotification,
+      object: nil, userInfo: [
+        AVAudioSessionInterruptionTypeKey: type.rawValue,
+        AVAudioSessionInterruptionOptionKey:
+          shouldResume ? AVAudioSession.InterruptionOptions.shouldResume.rawValue : UInt(0),
+      ])
+  }
+
+  func testForegroundWithoutInterruptionEndNeverInventsResumePermission() throws {
+    for enabled in [false, true] {
+      UserDefaults.standard.set(enabled, forKey: "playback.resume")
+      let transport = PlaybackTestTransport()
+      let service = try makeService(transport)
+      NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+      service.play(); drainMainQueue()
+      postInterruption(.began)
+      let plays = transport.commands.filter { $0 == "play" }.count
+      NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+      drainMainQueue()
+      XCTAssertEqual(service.snapshot()["interrupted"] as? Bool, true)
+      XCTAssertEqual(transport.commands.filter { $0 == "play" }.count, plays)
+      service.pause()
+    }
+  }
+
+  func testDisabledAutoResumeHonorsSystemShouldResumeHintWithoutRestarting() throws {
+    UserDefaults.standard.set(false, forKey: "playback.resume")
+    let transport = PlaybackTestTransport()
+    let service = try makeService(transport)
+    service.play(); drainMainQueue(); postInterruption(.began)
+    let plays = transport.commands.filter { $0 == "play" }.count
+    postInterruption(.ended, shouldResume: true)
+    NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+    drainMainQueue()
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, false)
+    XCTAssertEqual(transport.commands.filter { $0 == "play" }.count, plays)
+  }
+
+  func testMediaServicesResetRebuildsPlayerAndEngineWithoutAutoplay() throws {
+    let transport = PlaybackTestTransport()
+    let service = try makeService(transport)
+    service.play(); drainMainQueue()
+    let oldPlayer = service.player
+    let oldEngine = service.mediaKitEngineId
+    let plays = transport.commands.filter { $0 == "play" }.count
+    NotificationCenter.default.post(name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
+    waitUntil { service.mediaKitEngineId != nil && service.mediaKitEngineId != oldEngine }
+    XCTAssertFalse(service.player === oldPlayer)
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, false)
+    XCTAssertEqual(service.snapshot()["interrupted"] as? Bool, false)
+    XCTAssertEqual(transport.commands.filter { $0 == "play" }.count, plays)
+    prepareCurrent(service)
+    XCTAssertEqual(transport.commands.filter { $0 == "play" }.count, plays)
+    service.play(); drainMainQueue()
+    XCTAssertGreaterThan(transport.commands.filter { $0 == "play" }.count, plays)
+  }
+
+  func testOpeningAnotherMediaDuringInterruptionDoesNotClearSystemGate() throws {
+    let transport = PlaybackTestTransport()
+    let service = try makeService(transport)
+    service.play(); drainMainQueue(); postInterruption(.began)
+    let plays = transport.commands.filter { $0 == "play" }.count
+    try service.open(paths: ["a.mkv", "b.mkv"], selected: 1, resume: false)
+    waitUntil { service.mediaKitEngineId != nil }
+    XCTAssertEqual(service.snapshot()["interrupted"] as? Bool, true)
+    XCTAssertEqual(transport.commands.filter { $0 == "play" }.count, plays)
+    service.pause()
   }
 
   func testBackgroundPreferencePersistsFalseAcrossServiceCreation() throws {
@@ -135,6 +288,65 @@ final class PlaybackSessionTests: XCTestCase {
     drainMainQueue()
     XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, false)
     XCTAssertEqual(transport.commands.filter { $0 == "play" }.count, playsBeforeCompletion)
+  }
+
+  func testDecoderRecoveryBudgetSurvivesAutomaticEngineReplacement() throws {
+    try XCTSkipUnless(UIApplication.shared.applicationState == .active,
+                      "Recovery is deliberately foreground-only; run hosted tests with app active")
+    let transport = PlaybackTestTransport()
+    let service = try makeService(transport)
+    NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+    service.play(); transport.holdDecoderRecovery = true
+    let firstID = try XCTUnwrap(service.mediaKitEngineId)
+    var first: [Bool] = []
+    service.requestMediaKitDecoderRecovery(engineID: firstID,
+      positionVersion: transport.versions[firstID] ?? 0) { first.append($0) }
+    XCTAssertEqual(transport.decoderRecoveries.count, 1)
+    transport.decoderRecoveries[0](true); drainMainQueue()
+    XCTAssertEqual(first, [true])
+
+    NotificationCenter.default.post(name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
+    waitUntil { service.mediaKitEngineId != nil && service.mediaKitEngineId != firstID }
+    prepareCurrent(service); service.play()
+    let secondID = try XCTUnwrap(service.mediaKitEngineId)
+    var second: [Bool] = []
+    service.requestMediaKitDecoderRecovery(engineID: secondID,
+      positionVersion: transport.versions[secondID] ?? 0) { second.append($0) }
+    XCTAssertEqual(second, [false])
+    XCTAssertEqual(transport.decoderRecoveries.count, 1)
+    XCTAssertEqual(service.snapshot()["error"] as? String, "media_playback_failed")
+    XCTAssertTrue((service.playbackInfo()["technicalDetail"] as? String)?.contains("media_decoder_recovery_failed") == true)
+
+    // An explicit user open is a new task and receives one fresh budget.
+    try service.open(paths: ["a.mkv", "b.mkv"], selected: 0, resume: false)
+    prepareCurrent(service); service.play()
+    let explicitID = try XCTUnwrap(service.mediaKitEngineId)
+    service.requestMediaKitDecoderRecovery(engineID: explicitID,
+      positionVersion: transport.versions[explicitID] ?? 0) { _ in }
+    XCTAssertEqual(transport.decoderRecoveries.count, 2)
+    transport.decoderRecoveries[1](true); drainMainQueue()
+    service.pause()
+  }
+
+  func testOlderDecoderFailureCannotOverrideANewerPause() throws {
+    try XCTSkipUnless(UIApplication.shared.applicationState == .active,
+                      "Recovery is deliberately foreground-only; run hosted tests with app active")
+    let transport = PlaybackTestTransport()
+    let service = try makeService(transport)
+    NotificationCenter.default.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+    service.play(); transport.holdDecoderRecovery = true
+    let id = try XCTUnwrap(service.mediaKitEngineId)
+    var results: [Bool] = []
+    service.requestMediaKitDecoderRecovery(engineID: id,
+      positionVersion: transport.versions[id] ?? 0) { results.append($0) }
+    XCTAssertEqual(transport.decoderRecoveries.count, 1)
+    service.pause()
+    let playCount = transport.commands.filter { $0 == "play" }.count
+    transport.decoderRecoveries[0](false); drainMainQueue()
+    XCTAssertEqual(results, [true])
+    XCTAssertEqual(service.snapshot()["wantsPlayback"] as? Bool, false)
+    XCTAssertEqual(service.snapshot()["error"] as? String, "")
+    XCTAssertEqual(transport.commands.filter { $0 == "play" }.count, playCount)
   }
 
   private func makeService(_ transport: PlaybackTestTransport, remember: Bool = true,
@@ -694,5 +906,139 @@ final class PlaybackSessionTests: XCTestCase {
     XCTAssertEqual(results, [false])
     transport.seeks[0].finish(true)
     XCTAssertEqual(results, [false])
+  }
+}
+
+/// Run with Apple UIKit/AVFoundation. Linux parse/harness cannot validate the
+/// real Core Animation ordering or AVKit's rendering of retained source layers.
+final class NativePlaybackTimingTests: XCTestCase {
+  func testOnlyConsecutiveEligibleTicksMeasureDelay() {
+    var timing = NativePlaybackTiming()
+    timing.observeTick(now: 1, eligible: true, generation: 1)
+    timing.observeTick(now: 1.25, eligible: true, generation: 1)
+    timing.observeTick(now: 1.8, eligible: true, generation: 1)
+    XCTAssertEqual(timing.gapCount, 2)
+    XCTAssertEqual(timing.maxGapExcessMs, 300, accuracy: 0.001)
+    timing.observeTick(now: 2, eligible: false, generation: 1)
+    timing.observeTick(now: 100, eligible: true, generation: 1)
+    timing.clearTickBaseline()
+    timing.observeTick(now: 200, eligible: true, generation: 1)
+    XCTAssertEqual(timing.gapCount, 2)
+    XCTAssertEqual(timing.maxGapExcessMs, 300, accuracy: 0.001)
+  }
+
+  func testRepeatedBaselinesAreNotReportedAsMeasuredZero() {
+    var timing = NativePlaybackTiming()
+    timing.observeTick(now: 1, eligible: true, generation: 1)
+    timing.clearTickBaseline()
+    timing.observeTick(now: 10, eligible: true, generation: 1)
+    XCTAssertEqual(timing.tickCount, 2)
+    XCTAssertEqual(timing.diagnostics["gapCount"] as? Int, 0)
+  }
+
+  func testNewGenerationResetsAppAudioCallCountersAndTiming() {
+    var timing = NativePlaybackTiming()
+    timing.recordAudioCall(activate: true, reason: "activate:explicit-play", generation: 1)
+    timing.recordAudioCall(activate: false, reason: "deactivate:idle", generation: 1)
+    XCTAssertEqual(timing.audioActivateCount, 1)
+    XCTAssertEqual(timing.audioDeactivateCount, 1)
+    timing.observeTick(now: 3, eligible: true, generation: 2)
+    XCTAssertEqual(timing.generation, 2)
+    XCTAssertEqual(timing.audioActivateCount, 0)
+    XCTAssertEqual(timing.audioDeactivateCount, 0)
+    XCTAssertEqual(timing.audioLastReason, "")
+    XCTAssertEqual(timing.gapCount, 0)
+  }
+}
+
+final class CurrentSessionCheckpointTests: XCTestCase {
+  func testVolatilePositionUsesSourceClockAndPreservesNearEnd() {
+    let session = UUID()
+    let checkpoint = CurrentSessionCheckpoint(sessionID: session, path: "a.mkv",
+      generation: 7, engineID: "engine-7", sourcePosition: 119.5)
+    XCTAssertEqual(checkpoint.position(sessionID: session, path: "a.mkv", origin: 0, duration: 120), 119.5)
+    XCTAssertEqual(checkpoint.position(sessionID: session, path: "a.mkv", origin: 2, duration: 118), 117.5)
+  }
+
+  func testSamePathDifferentSelectionCannotUseOldCheckpoint() {
+    let session = UUID()
+    let checkpoint = CurrentSessionCheckpoint(sessionID: session, path: "a.mkv",
+      generation: 1, engineID: "engine-1", sourcePosition: 42)
+    XCTAssertNil(checkpoint.position(sessionID: UUID(), path: "a.mkv", origin: 0, duration: 120))
+    XCTAssertNil(checkpoint.position(sessionID: session, path: "b.mkv", origin: 0, duration: 120))
+  }
+
+  func testUnusableTimingIsNotAnInventedZeroRecovery() {
+    let session = UUID()
+    for value in [Double.nan, Double.infinity, -1] {
+      let checkpoint = CurrentSessionCheckpoint(sessionID: session, path: "a.mkv",
+        generation: 1, engineID: "engine-1", sourcePosition: value)
+      XCTAssertNil(checkpoint.position(sessionID: session, path: "a.mkv", origin: 0, duration: 120))
+    }
+    let checkpoint = CurrentSessionCheckpoint(sessionID: session, path: "a.mkv",
+      generation: 1, engineID: "engine-1", sourcePosition: 0)
+    XCTAssertEqual(checkpoint.position(sessionID: session, path: "a.mkv", origin: 0, duration: 120), 0)
+    XCTAssertNil(checkpoint.position(sessionID: session, path: "a.mkv", origin: 0, duration: 0))
+    XCTAssertNil(checkpoint.position(sessionID: session, path: "a.mkv", origin: .nan, duration: 120))
+  }
+}
+
+final class PlayerSurfaceIsolationTests: XCTestCase {
+  func testPiPControllerLayerUsesNonOptionalAppleSDKDeclaration() throws {
+    guard AVPictureInPictureController.isPictureInPictureSupported() else {
+      throw XCTSkip("PiP is unavailable on this test device")
+    }
+    let source = AVPlayerLayer()
+    let controller = try XCTUnwrap(AVPictureInPictureController(playerLayer: source))
+    // This assignment is an Apple-SDK compile-time contract, even on a target
+    // that skips execution. ContentSource.playerLayer has a different type.
+    let actual: AVPlayerLayer = controller.playerLayer
+    XCTAssertTrue(actual === source)
+  }
+
+  func testIsolationPreservesOldPlayerLayerAndCoversItBelowCaptions() throws {
+    let view = PlayerSurface(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+    let retainedLayer = view.videoLayer
+    let retainedItem = AVPlayerItem(asset: AVMutableComposition())
+    let retainedPlayer = AVPlayer(playerItem: retainedItem)
+    retainedLayer.player = retainedPlayer
+    retainedLayer.videoGravity = .resizeAspectFill
+
+    view.isolateVideoLayer(retainedLayer)
+    let replacement = view.videoLayer
+    XCTAssertFalse(replacement === retainedLayer)
+    XCTAssertTrue(retainedLayer.player === retainedPlayer)
+    XCTAssertTrue(retainedPlayer.currentItem === retainedItem)
+    XCTAssertEqual(replacement.videoGravity, .resizeAspectFill)
+    XCTAssertTrue(replacement.isOpaque)
+    XCTAssertEqual(replacement.backgroundColor, UIColor.black.cgColor)
+    XCTAssertFalse(view.layer.isHidden)
+    XCTAssertTrue(replacement.superlayer === view.layer)
+    let layers = try XCTUnwrap(view.layer.sublayers)
+    XCTAssertLessThan(try XCTUnwrap(layers.firstIndex(of: replacement)),
+                      try XCTUnwrap(layers.firstIndex(of: view.caption.layer)))
+
+    view.frame.size = CGSize(width: 640, height: 360)
+    view.setNeedsLayout(); view.layoutIfNeeded()
+    XCTAssertEqual(replacement.frame, view.bounds)
+    view.isolateVideoLayer(retainedLayer)
+    XCTAssertTrue(view.videoLayer === replacement, "Repeated isolation cannot add another current layer")
+  }
+
+  func testLaterTerminalRemovesOnlyRetainedSublayerAndKeepsCurrentPresentation() {
+    let view = PlayerSurface(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+    let backing = view.videoLayer
+    view.isolateVideoLayer(backing)
+    let retired = view.videoLayer
+    view.isolateVideoLayer(retired)
+    let current = view.videoLayer
+    let player = AVPlayer()
+    current.player = player
+    view.releaseIsolatedVideoLayer(retired)
+    view.releaseIsolatedVideoLayer(backing)
+    XCTAssertNil(retired.superlayer)
+    XCTAssertTrue(view.videoLayer === current)
+    XCTAssertTrue(current.player === player)
+    XCTAssertTrue(current.superlayer === view.layer)
   }
 }

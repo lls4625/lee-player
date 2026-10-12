@@ -813,15 +813,6 @@ final class AVPlayerPresentationPolicyTests: XCTestCase {
     }
   }
 
-  func testExplicitBackgroundCleanupNeverConfusesInactiveWithBackground() {
-    for bits in 0..<64 {
-      func bit(_ index: Int) -> Bool { bits & (1 << index) != 0 }
-      XCTAssertEqual(AVPlayerPresentationPolicy.permitsBackgroundDetach(
-        background: bit(0), replacing: bit(1), authorized: bit(2), starting: bit(3),
-        pipActive: bit(4), retiring: bit(5)), bits == 1)
-    }
-  }
-
   func testAttachmentKeepsAuthorizedAndActivePiPHandoff() {
     for bits in 0..<8 {
       XCTAssertEqual(AVPlayerPresentationPolicy.permitsAttachment(active: bits & 1 != 0,
@@ -833,6 +824,17 @@ final class AVPlayerPresentationPolicyTests: XCTestCase {
     for bits in 0..<8 {
       XCTAssertEqual(AVPlayerPresentationPolicy.requiresTerminal(startIssued: bits & 1 != 0,
         startObserved: bits & 2 != 0, active: bits & 4 != 0), bits != 0)
+    }
+  }
+}
+
+final class MediaKitDecoderRecoveryPolicyTests: XCTestCase {
+  func testRecoveryRequiresExactStableForegroundTaskWithoutAnyPresentationOwner() {
+    for bits in 0..<128 {
+      func bit(_ index: Int) -> Bool { bits & (1 << index) != 0 }
+      XCTAssertEqual(MediaKitDecoderRecoveryPolicy.permitsRequest(
+        identityMatches: bit(0), active: bit(1), wantsPlayback: bit(2), stable: bit(3),
+        presentationOwned: bit(4), attempted: bit(5), recovering: bit(6)), bits == 15)
     }
   }
 }
