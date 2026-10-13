@@ -18,6 +18,8 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
   static const _videoChannel = MethodChannel('com.alexmercerind/media_kit_video');
   Player? _player;
   VideoController? controller;
+  int? _videoAttachFrame;
+  Completer<void>? _videoAttachReady;
   String engineId = '';
   String? _requestedId;
   Future<void> _commands = Future<void>.value();
@@ -55,8 +57,54 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Measurement only: never count time spent suspended as event-loop delay.
+    // Never count time spent suspended as event-loop delay.
     _resetMeasurementWindow();
+    if (state == AppLifecycleState.resumed) {
+      final player = _player;
+      if (player != null) _scheduleVideoAttachment(player, engineId);
+    } else {
+      // A foreground open waiting for its first frame can still become an
+      // audio-only background open. Do not leave it waiting on a hidden UI.
+      _cancelVideoAttachment();
+    }
+  }
+
+  void _scheduleVideoAttachment(Player player, String id) {
+    if (!_sameSession(player, id) || _isAudio || controller != null ||
+        _failure.isNotEmpty || _videoAttachFrame != null ||
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) return;
+    // media_kit_video 2.0.1 marks the player as video-attached immediately,
+    // then waits for a post-frame callback. NativePlayer.open, controls and
+    // dispose all wait for that attachment. A background/locked app has no
+    // frames, so keep the default vid=no audio path independent of Flutter.
+    // Construct at frame START: the plugin's post-frame callback can complete
+    // in this same frame, including when open races with going to background.
+    final ready = _videoAttachReady = Completer<void>();
+    _videoAttachFrame = WidgetsBinding.instance.scheduleFrameCallback((_) {
+      _videoAttachFrame = null;
+      _videoAttachReady = null;
+      try {
+        if (!_sameSession(player, id) || _isAudio || controller != null ||
+            _failure.isNotEmpty ||
+            WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) return;
+        controller = VideoController(player,
+          configuration: const VideoControllerConfiguration(enableHardwareAcceleration: true));
+        _log('inline video attached on foreground frame');
+        // Attach the existing player only. Never reopen, seek or change play
+        // intent here: pause, background-off and newer sessions must still win.
+        notifyListeners();
+      } finally {
+        ready.complete();
+      }
+    });
+  }
+
+  void _cancelVideoAttachment() {
+    final frame = _videoAttachFrame;
+    _videoAttachFrame = null;
+    if (frame != null) WidgetsBinding.instance.cancelFrameCallbackWithId(frame);
+    _videoAttachReady?.complete();
+    _videoAttachReady = null;
   }
 
   void _resetMeasurementWindow() {
@@ -274,10 +322,7 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
       _decoderRecoveryStatus = 'idle'; _subtitleFontStatus = 'unavailable';
       final player = Player(configuration: const PlayerConfiguration(libass: true, logLevel: MPVLogLevel.warn));
       _player = player;
-      if (args['isAudio'] != true) {
-        controller = VideoController(player,
-          configuration: const VideoControllerConfiguration(enableHardwareAcceleration: true));
-      }
+      _scheduleVideoAttachment(player, id);
       notifyListeners();
       _subscriptions.add(player.stream.error.listen((message) {
         final origin = _snapshots.capture();
@@ -288,6 +333,15 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
         _log('${entry.prefix}: ${entry.text}');
         _decoderMonitor.record(entry.prefix, entry.text, _clock.elapsedMilliseconds);
       }));
+      // Visible opens retain video-before-load ordering, including videos
+      // with no audio track. Leaving the foreground releases this wait.
+      while (_videoAttachReady != null && _allows(permit, id, player)) {
+        await _videoAttachReady!.future;
+      }
+      if (!_allows(permit, id, player)) {
+        await _abandonOpen(player);
+        return false;
+      }
       final native = player.platform as NativePlayer;
       await native.setProperty('audio-spdif', '');
       if (!_allows(permit, id, player)) {
@@ -390,6 +444,9 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
           () => player.setSubtitleTrack(previousSubtitle));
         break;
       case 'pip':
+        // A background-opened item has no inline output to hand over yet.
+        // Reject a late request without pausing audio or creating a renderer.
+        if (controller == null) return false;
         final handle = await player.handle;
         if (!_allows(permit, id, player)) return false;
         final requestId = args['requestId'] as String? ?? '';
@@ -1169,6 +1226,7 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<bool> _release() async {
+    _cancelVideoAttachment();
     _measurements?.close();
     _resetMeasurementWindow();
     final player = _player;

@@ -1,7 +1,7 @@
 name: leeplayer
 description: "Local course video player for iOS."
 publish_to: 'none'
-version: 3.0.0+15
+version: 3.0.0+16
 
 environment:
   sdk: ^3.13.2
@@ -25,6 +25,8 @@ dev_dependencies:
 dependency_overrides:
   media_kit:
     path: third_party/media_kit
+  media_kit_video:
+    path: third_party/media_kit_video
 
 flutter:
   uses-material-design: true
