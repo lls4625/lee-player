@@ -1696,43 +1696,61 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     );
   }
 
+  bool get showsLibraryContextBack =>
+      tab == 1 || tab == 2 || (tab == 0 && folder.isNotEmpty);
+
+  void returnFromLibraryContext() {
+    if (tab == 1 || tab == 2) {
+      setState(() => tab = 0);
+      return;
+    }
+    if (tab != 0 || folder.isEmpty) return;
+    setState(() {
+      folder = folder.contains('/')
+          ? folder.substring(0, folder.lastIndexOf('/'))
+          : '';
+    });
+  }
+
+  Widget libraryAppBarTitle() {
+    final style = Theme.of(context).textTheme.titleLarge;
+    if (tab == 1) {
+      return LText(
+        '最近播放',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: style,
+      );
+    }
+    if (tab == 2) {
+      return LText(
+        '我的收藏',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: style,
+      );
+    }
+    if (tab == 0 && folder.isNotEmpty) {
+      return Text(
+        folder.split('/').last,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: style,
+      );
+    }
+    return LText(
+      '雷 player',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: style,
+    );
+  }
+
   Widget libraryHeader() {
     final resume = resumeEntry;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (tab != 0 || folder.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
-            child: Row(
-              children: [
-                LeiGlassIconButton(
-                  icon: const Icon(Icons.arrow_back_rounded),
-                  tooltip: '返回',
-                  onPressed: () => setState(() {
-                    if (tab != 0) {
-                      tab = 0;
-                    } else {
-                      folder = folder.contains('/')
-                          ? folder.substring(0, folder.lastIndexOf('/'))
-                          : '';
-                    }
-                  }),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: LText(
-                    tab == 1
-                        ? '最近播放'
-                        : tab == 2
-                        ? '我的收藏'
-                        : folder.split('/').last,
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                ),
-              ],
-            ),
-          ),
         if (tab == 0 && resume != null) resumeCard(resume),
         const SizedBox(height: 8),
       ],
@@ -1986,7 +2004,14 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         centerTitle: false,
         toolbarHeight: 64,
         padding: const EdgeInsets.symmetric(horizontal: 20),
-        title: LText('雷 player', style: Theme.of(context).textTheme.titleLarge),
+        leading: showsLibraryContextBack
+            ? LeiGlassIconButton(
+                icon: const Icon(Icons.arrow_back_rounded),
+                tooltip: '返回',
+                onPressed: returnFromLibraryContext,
+              )
+            : null,
+        title: libraryAppBarTitle(),
         actions: [
           if (tab == 0 && folder.isEmpty) ...[
             LeiGlassIconButton(
