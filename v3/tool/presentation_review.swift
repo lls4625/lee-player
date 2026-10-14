@@ -7,7 +7,7 @@ import Dispatch
 // classes. Production method bodies are inserted unchanged by the runner.
 enum ReviewStatus: Int { case unknown = 0, readyToPlay = 1, failed = 2 }
 final class AVPlayerItem { var status = ReviewStatus.readyToPlay }
-final class AVPlayer {
+final class AVPlayer: NSObject {
   struct RateDidChangeReason: RawRepresentable, Equatable {
     var rawValue: String
     static let setRateCalled = Self(rawValue: "setRateCalled")
@@ -207,8 +207,9 @@ final class ReviewEngine {
   var seekable = true
   var restoreCalls = 0
   var outputRestoreCompletions: [(Bool) -> Void] = []
-  func restoreVideoOutput(completion: @escaping (Bool) -> Void) {
-    restoreCalls += 1; outputRestoreCompletions.append(completion)
+  var outputRestoreRequestIDs: [String] = []
+  func restoreVideoOutput(requestID: String, completion: @escaping (Bool) -> Void) {
+    restoreCalls += 1; outputRestoreRequestIDs.append(requestID); outputRestoreCompletions.append(completion)
   }
   var controls: [(String, (Bool) -> Void)] = []
   func recordDiagnostic(_ message: String) {}
@@ -289,6 +290,8 @@ final class PresentationReviewHost {
   var mediaKitPiPActiveRequestID: String?
   var mediaKitPiPPreparationTimeout: DispatchWorkItem?
   var mediaKitPiPRestoring = false
+  var mediaKitPiPRestoreRequestID: String?
+  var deferredMediaKitVideoRestore: (engine: LeeMediaKitEngine, generation: Int, requestID: String?)?
   var mediaKitPiPRestoreTimeout: DispatchWorkItem?
   var retiringPiP: [ObjectIdentifier: (controller: AVPictureInPictureController,
     renderer: MediaKitPiPRenderer?, requiresTerminal: Bool)] = [:]
@@ -406,6 +409,7 @@ final class PresentationReviewHost {
   }
   func cancelAudioRecovery() {}
   func finishTrackSelection(_ message: String) {}
+  func cancelSubtitleLoad() {}
   func cancelIntroDetection() {}
   func cancelSeeks() {}
   func pauseEngine() { endInlinePiPTransportFollow(); pauses += 1; player.pause(); enginePlaying = false }
@@ -442,6 +446,7 @@ final class PresentationReviewHost {
 
   func performLoad(resume: Bool, autoplay: Bool) {
     discardAVPlayerPiP()
+    discardMediaKitPiP()
     loads += 1; generation += 1
     loadedPaths.append(currentPath ?? ""); loadedAutoplay.append(autoplay)
     wantsPlayback = autoplay && playbackEnvironmentAllowsPlayback
@@ -473,6 +478,7 @@ final class PresentationReviewHost {
 
   func clearPlaybackEnginesAfterMutation() {
     discardAVPlayerPiP()
+    discardMediaKitPiP()
     clears += 1; installedAVPlayerItem = nil; player.currentItem = nil; mediaKit = nil; loading = false
   }
   func sourceSnapshot(_ layer: AVPlayerLayer?) -> String { avPlayerPiPSourceSnapshot(layer: layer) }
@@ -491,6 +497,12 @@ final class PresentationReviewHost {
     return controller
   }
   func resign() { discardUnrequestedAVPlayerPiP() }
+  func resignDuringOutputRestore() {
+    let notification = { [weak self] in
+      // PRODUCTION_MK_RESTORE_RESIGN
+    }
+    notification()
+  }
   func request(ready: Bool = true) -> AVPictureInPictureController {
     let controller = prepare(ready: ready)
     try! startPiP(delegate: ownedDelegate)
@@ -1782,6 +1794,122 @@ do {
   delayedInternal(); check(service.wantsPlayback, "queued internal seek pause does not erase intent")
   service.isSeeking = false; service.play()
   delayedInternal(); check(service.wantsPlayback, "late internal rate notification observes resumed output, not its obsolete pause")
+}
+
+// Background MK output restoration regression scenarios. These exercise the
+// extracted production methods and lifecycle body, never native GPU behavior.
+for state in [UIApplication.State.inactive, .background] {
+  for background in [false, true] {
+    let service = fresh(); service.background = background
+    let controller = acceptedMKPiP(service); let engine = service.mediaKit!
+    UIApplication.shared.applicationState = state; service.inBackground = true
+    service.willStopPiP(controller)
+    controller.isPictureInPictureActive = false; service.terminal(controller)
+    check(engine.restoreCalls == 0 && service.waiting && !service.wantsPlayback,
+          "MK close outside active foreground defers output and preserves close pause")
+    check(service.mediaKitPiPRestoreTimeout == nil && service.mediaKitPiPRestoreRequestID == nil,
+          "waiting for foreground has no restore watchdog or in-flight command")
+    check(service.busy, "deferred output remains visibly busy for a new PiP request")
+    do {
+      try service.startPiP(delegate: service.ownedDelegate, requestID: "repeat-while-deferred")
+      check(false, "pending output must reject a second handoff")
+    } catch {
+      check(!service.mediaKitPiPPreparing && service.mediaKitPiPRequestID == nil,
+            "repeat PiP during deferred restoration cannot take another rendering owner")
+    }
+    DispatchQueue.main.advance(120)
+    service.resumeDeferredMediaKitVideoOutput(engineID: engine.id)
+    check(engine.restoreCalls == 0 && service.loads == 0 && !service.seekFault,
+          "inactive/background waiting never creates output or spends recovery timeout")
+    UIApplication.shared.applicationState = .active; service.inBackground = false
+    service.resumeDeferredMediaKitVideoOutput()
+    service.resumeDeferredMediaKitVideoOutput(engineID: engine.id)
+    check(engine.restoreCalls == 1 && service.waiting,
+          "both foreground notifications issue exactly one MK restoration")
+    engine.outputRestoreCompletions[0](true); DispatchQueue.main.advance()
+    engine.outputRestoreCompletions[0](true); DispatchQueue.main.advance()
+    check(!service.waiting && !service.wantsPlayback && service.audioRecoveryCalls == 0,
+          "foreground output success and duplicate result cannot resume a closed PiP")
+  }
+}
+for newerIntent in 0..<5 {
+  let service = fresh(); let controller = acceptedMKPiP(service); let engine = service.mediaKit!
+  let token = UUID(); check(service.beginPiPRestore(controller, token: token), "MK UI restore accepted")
+  service.completePiPRestore(controller, token: token, restored: true)
+  UIApplication.shared.applicationState = .background; service.inBackground = true
+  controller.isPictureInPictureActive = false; service.terminal(controller)
+  check(service.waiting && service.wantsPlayback && engine.restoreCalls == 0,
+        "background MK UI restore retains live playback intent without output creation")
+  switch newerIntent {
+  case 1: service.pause()
+  case 2: service.playerDismissed()
+  case 3: service.interrupted = true
+  case 4: service.enterBackground(enabled: false)
+  default: break
+  }
+  UIApplication.shared.applicationState = .active; service.inBackground = false
+  service.resumeDeferredMediaKitVideoOutput(); engine.outputRestoreCompletions[0](true)
+  DispatchQueue.main.advance()
+  check(!service.waiting && service.audioRecoveryCalls == (newerIntent == 0 ? 1 : 0),
+        "MK UI restoration respects newer pause, page dismissal, interruption and background-off")
+  check(service.loads == 0 && service.requestedSeeks.isEmpty,
+        "healthy foreground reconstruction neither reloads nor seeks")
+}
+for oldSuccess in [false, true] {
+  let service = fresh(); let controller = acceptedMKPiP(service); let engine = service.mediaKit!
+  controller.isPictureInPictureActive = false; service.terminal(controller)
+  let oldID = engine.outputRestoreRequestIDs[0]
+  let oldTimeout = service.mediaKitPiPRestoreTimeout!
+  UIApplication.shared.applicationState = .inactive
+  service.resignDuringOutputRestore()
+  check(service.deferredMediaKitVideoRestore?.requestID == oldID && oldTimeout.cancelled,
+        "willResignActive immediately defers in-flight output and cancels its watchdog")
+  check(service.deferMediaKitVideoOutput(engineID: engine.id, requestID: oldID),
+        "Dart duplicate deferral after native lifecycle notification is idempotently accepted")
+  DispatchQueue.main.advance(120)
+  check(service.loads == 0 && engine.restoreCalls == 1 && service.waiting,
+        "suspension time cannot become a foreground-recovery failure")
+  UIApplication.shared.applicationState = .active; service.inBackground = false
+  service.resumeDeferredMediaKitVideoOutput(engineID: engine.id)
+  let newID = engine.outputRestoreRequestIDs[1]
+  check(newID != oldID && service.mediaKitPiPRestoreRequestID == newID,
+        "resumed same-engine restoration has a fresh attempt identity")
+  check(!service.deferMediaKitVideoOutput(engineID: engine.id, requestID: oldID),
+        "late old deferral cannot consume a newer foreground attempt")
+  engine.outputRestoreCompletions[0](oldSuccess); oldTimeout.work(); DispatchQueue.main.advance()
+  check(service.mediaKitPiPRestoreRequestID == newID && service.waiting && service.loads == 0,
+        "old success, failure and even forced old watchdog body cannot complete current attempt")
+  engine.outputRestoreCompletions[1](true); DispatchQueue.main.advance()
+  check(!service.waiting && engine.restoreCalls == 2 && service.loads == 0,
+        "only matching latest output result ends restoration")
+}
+for obsolete in 0..<4 {
+  let service = fresh(); let controller = acceptedMKPiP(service); let engine = service.mediaKit!
+  UIApplication.shared.applicationState = .background
+  controller.isPictureInPictureActive = false; service.terminal(controller)
+  switch obsolete {
+  case 0: service.generation += 1
+  case 1: service.mediaKit = ReviewEngine()
+  case 2: service.loadLatest("new.mp4", autoplay: false)
+  default: service.clearLatest()
+  }
+  UIApplication.shared.applicationState = .active; service.inBackground = false
+  service.resumeDeferredMediaKitVideoOutput(engineID: engine.id)
+  check(service.deferredMediaKitVideoRestore == nil && engine.restoreCalls == 0,
+        "new generation, engine, selected item or cleared queue discards obsolete output intent")
+}
+do {
+  let service = fresh(); let controller = acceptedMKPiP(service); let engine = service.mediaKit!
+  controller.isPictureInPictureActive = false; service.terminal(controller)
+  let oldID = engine.outputRestoreRequestIDs[0]
+  service.failPlayback()
+  check(!service.deferMediaKitVideoOutput(engineID: engine.id, requestID: nil),
+        "late rollback without attempt ID cannot resurrect a failed same-engine session")
+  check(!service.deferMediaKitVideoOutput(engineID: engine.id, requestID: oldID),
+        "failed generation also rejects its old exact restoration attempt")
+  engine.outputRestoreCompletions[0](true); DispatchQueue.main.advance()
+  check(!service.waiting && !service.wantsPlayback && service.seekFault,
+        "late output result after failure preserves terminal playback state")
 }
 
 // PiP diagnostics regression scenarios execute production logging methods.

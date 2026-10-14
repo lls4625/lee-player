@@ -118,6 +118,8 @@ final class Service {
  var mediaKitTransport:((String,[String:Any],@escaping (Bool)->Void)->Void)? = { _,_,completion in completion(true) }
  var plays=0, pauses=0, loads:[Bool]=[], foregroundRepairs=0, retries=0
  func publish() {}; func persist() {}; func recordLifecycle(_ s:String) {}
+ // Video-output lifecycle is covered by the production presentation harness.
+ func resumeDeferredMediaKitVideoOutput() {}
  func ensureAVPlayerPresentation(reason:String) { foregroundRepairs += 1 }
  func tick() { if let d=sleepUntil,d <= Date() { pause() } }
  func resolveEndCandidate() {}; func performPendingEndAction() {}; func restartCurrentItem() {}; func seek(_ n:Double) {}

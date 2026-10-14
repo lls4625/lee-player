@@ -38,6 +38,8 @@ def source_checks(source, bridge, renderer, header):
         count += 1
 
     resign = block(source, 'notifications.append(center.addObserver(forName: UIApplication.willResignActiveNotification')
+    check('deferMediaKitVideoOutput' in resign and 'mediaKitPiPRestoreRequestID' in resign,
+          'willResign cancels an in-flight MK restore before suspension')
     check('discardUnrequestedAVPlayerPiP()' in resign and 'videoLayer.player' not in resign,
           'willResign revokes only unrequested preparation without touching video')
     background = block(source, 'notifications.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification')
@@ -67,6 +69,13 @@ def source_checks(source, bridge, renderer, header):
           'source matching is a non-nil pre-clear Boolean reused only as captured evidence')
     active = block(source, 'notifications.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification')
     check('ensureAVPlayerPresentation' in active, 'active notification repairs and reprepares')
+    check('resumeDeferredMediaKitVideoOutput()' in active,
+          'active notification consumes deferred MK output restoration')
+    output_restore = block(source, '  private func restoreMediaKitVideoOutput(')
+    check(output_restore.index('applicationState == .active') < output_restore.index('mediaKit.restoreVideoOutput('),
+          'MK restoration enters foreground gate before sending output creation')
+    check('self.mediaKitPiPRestoreRequestID == requestID' in output_restore,
+          'restoration callback and watchdog fence exact same-session attempt IDs')
     attach = block(source, '  private func attachAVPlayerPresentationIfAllowed(')
     check('videoLayer.player = nil' not in attach, 'rejected attach cannot detach')
     check('if videoLayer.player !== player' in attach, 'attachment is idempotent')
@@ -316,6 +325,7 @@ def main(default_case_group='all'):
         '  private static func pipDiagnosticIdentity(', '  private static func pipDiagnosticRect(',
         '  private func avPlayerPiPSourceSnapshot(',
         '  private func cancelPendingAVPlayerPiP(', '  func finishMediaKitPiP(',
+        '  func deferMediaKitVideoOutput(', '  func resumeDeferredMediaKitVideoOutput(',
         '  private func restoreMediaKitVideoOutput(', '  private func recoverMediaKitVideoOutput(',
         '  private func captureRememberedProgress(', '  private func resetCurrentSessionCheckpoint(',
         '  private func restoreCurrentSessionPositionIfNeeded(',
@@ -372,6 +382,9 @@ def main(default_case_group='all'):
                               source[route_start:route_end] + '\n    return restoringCurrentMKPosition')
     expiry = block(block(source, '  private func tick()'), '    if manualPiPSession != nil')
     harness = harness.replace('// PRODUCTION_AV_PIP_HEARTBEAT', expiry)
+    resign = block(source, 'notifications.append(center.addObserver(forName: UIApplication.willResignActiveNotification')
+    harness = harness.replace('// PRODUCTION_MK_RESTORE_RESIGN',
+        block(resign, 'if let self, let engine = self.mediaKit, let requestID = self.mediaKitPiPRestoreRequestID'))
     # Apple's controller.playerLayer is AVPlayerLayer, not AVPlayerLayer?.
     # Compile the exact former misuse against the same non-optional collaborator
     # as a negative control, so an accidentally optional mock cannot hide it.

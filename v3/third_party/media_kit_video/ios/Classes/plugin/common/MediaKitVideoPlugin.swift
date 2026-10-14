@@ -1,5 +1,6 @@
 #if canImport(Flutter)
   import Flutter
+  import UIKit
 #elseif canImport(FlutterMacOS)
   import FlutterMacOS
 #endif
@@ -71,6 +72,16 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
     _ result: FlutterResult
   ) {
     let args = arguments as? [String: Any]
+    // PiP restoration opts in; reject before constructing/enqueuing a GPU
+    // output when the platform message arrives after leaving the foreground.
+    #if os(iOS)
+      if args?["requireForeground"] as? Bool == true,
+         UIApplication.shared.applicationState != .active {
+        result(FlutterError(code: "video_output_background",
+          message: "Inline output restoration requires foreground", details: nil))
+        return
+      }
+    #endif
     let handleStr = args?["handle"] as! String
     let handle: Int64? = Int64(handleStr)
     let configDict = args?["configuration"] as! [String: Any]

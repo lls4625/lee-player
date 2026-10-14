@@ -302,7 +302,7 @@ final class LeeMediaKitEngine {
   func startPiP(requestID: String, completion: @escaping (Bool) -> Void) {
     send("pip", ["requestId": requestID], completion: completion)
   }
-  func restoreVideoOutput(completion: @escaping (Bool) -> Void) { send("pipRestore", completion: completion) }
+  func restoreVideoOutput(requestID: String, completion: @escaping (Bool) -> Void) { send("pipRestore", ["requestId": requestID], completion: completion) }
 
   func recordDiagnostic(_ text: String) {
     controls.append(String(format: "[%.1fs] %@", ProcessInfo.processInfo.systemUptime - startedAt, text))
@@ -331,6 +331,166 @@ struct SubtitleCue {
   let start: Double
   let end: Double
   let text: String
+}
+
+/// One cancellable, finite parse. Cancellation is checked off the main thread;
+/// the request identity is checked again on the main thread before any mutation.
+final class SubtitleParseRequest {
+  private let lock = NSLock()
+  private var cancelled = false
+  private let deadline = ProcessInfo.processInfo.systemUptime + 5
+  func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+  func check() throws {
+    lock.lock(); let stopped = cancelled; lock.unlock()
+    if stopped { throw LibraryFailure.app("track_selection_stale") }
+    if ProcessInfo.processInfo.systemUptime > deadline {
+      throw LibraryFailure.app("subtitle_load_failed")
+    }
+  }
+}
+
+struct SubtitleTimeline {
+  let cues: [SubtitleCue]
+  private let maximumEnds: [Double]
+  init(_ cues: [SubtitleCue] = []) {
+    self.cues = cues
+    var end = -Double.infinity
+    maximumEnds = cues.map { cue in end = max(end, cue.end); return end }
+  }
+  // Keep the original first-active-cue rule, including overlapping cues, without
+  // scanning a potentially large subtitle file on every main-thread heartbeat.
+  func text(at position: Double) -> String {
+    var low = 0, high = cues.count
+    while low < high {
+      let middle = low + (high - low) / 2
+      if maximumEnds[middle] <= position { low = middle + 1 } else { high = middle }
+    }
+    return low < cues.count && cues[low].start <= position ? cues[low].text : ""
+  }
+}
+
+enum ExternalSubtitleParser {
+  static let maximumBytes = 10 * 1024 * 1024
+  static let maximumCues = 100_000
+  static let maximumCueBytes = 64 * 1024
+  static let maximumCaptionBytes = 16 * 1024
+
+  /// Equivalent to <[^>]+> replacement, including literal <> and unmatched <,
+  /// but every UTF-8 byte is visited once rather than restarting at each <.
+  static func removingTags(_ text: String) -> String {
+    let bytes = Array(text.utf8)
+    var result = [UInt8](); result.reserveCapacity(bytes.count)
+    var opening: Int?
+    for (index, byte) in bytes.enumerated() {
+      if let start = opening {
+        if byte == 62 {
+          if index == start + 1 { result.append(60); result.append(62) }
+          opening = nil
+        }
+      } else if byte == 60 { opening = index }
+      else { result.append(byte) }
+    }
+    if let opening { result.append(contentsOf: bytes[opening...]) }
+    return String(decoding: result, as: UTF8.self)
+  }
+
+  static func read(_ url: URL, request: SubtitleParseRequest) throws -> SubtitleTimeline {
+    try request.check()
+    let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+    guard values.isRegularFile == true else { throw LibraryFailure.app("subtitle_load_failed") }
+    guard (values.fileSize ?? 0) <= maximumBytes else { throw LibraryFailure.app("subtitle_too_large") }
+    let file = try FileHandle(forReadingFrom: url)
+    defer { try? file.close() }
+    // Do not trust the preflight size: a provider/file can grow before reading.
+    var data = Data()
+    while data.count <= maximumBytes {
+      try request.check()
+      let chunk = try file.read(upToCount: min(64 * 1024, maximumBytes + 1 - data.count)) ?? Data()
+      if chunk.isEmpty { break }
+      data.append(chunk)
+    }
+    guard data.count <= maximumBytes else { throw LibraryFailure.app("subtitle_too_large") }
+    guard let text = String(data: data, encoding: .utf8) else { throw LibraryFailure.app("subtitle_load_failed") }
+    return try parse(text, request: request)
+  }
+
+  static func parse(_ text: String, request: SubtitleParseRequest) throws -> SubtitleTimeline {
+    guard text.utf8.count <= maximumBytes else { throw LibraryFailure.app("subtitle_too_large") }
+    func stamp(_ value: String) -> Double? {
+      let fields = value.replacingOccurrences(of: ",", with: ".").split(separator: ":")
+      let pieces = fields.compactMap { Double($0) }
+      guard pieces.count == fields.count, pieces.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return nil }
+      if pieces.count == 3 { return pieces[0] * 3600 + pieces[1] * 60 + pieces[2] }
+      if pieces.count == 2 { return pieces[0] * 60 + pieces[1] }
+      return nil
+    }
+    let bytes = Array(text.utf8)
+    var parsed: [SubtitleCue] = []
+    var timing: (start: Double, end: Double)?
+    var sawTiming = false
+    var caption = [UInt8]()
+    var captionLines = 0
+    func finishBlock() throws {
+      if let timing, captionLines > 0 {
+        guard parsed.count < maximumCues else { throw LibraryFailure.app("subtitle_load_failed") }
+        let text = removingTags(String(decoding: caption, as: UTF8.self))
+        guard text.utf8.count <= maximumCaptionBytes else { throw LibraryFailure.app("subtitle_load_failed") }
+        parsed.append(SubtitleCue(start: timing.start, end: timing.end, text: text))
+      }
+      timing = nil; sawTiming = false; caption.removeAll(keepingCapacity: true); captionLines = 0
+      try request.check()
+    }
+    func consumeLine(_ line: ArraySlice<UInt8>) throws {
+      // UIKit eventually lays out one caption on main. Bound both an individual
+      // line and a whole multiline cue, not just the background parser's input.
+      guard line.count <= maximumCueBytes else { throw LibraryFailure.app("subtitle_load_failed") }
+      if line.isEmpty { try finishBlock(); return }
+      if sawTiming {
+        guard caption.count + line.count + (captionLines > 0 ? 1 : 0) <= maximumCueBytes else {
+          throw LibraryFailure.app("subtitle_load_failed")
+        }
+        if captionLines > 0 { caption.append(10) }
+        caption.append(contentsOf: line); captionLines += 1
+      } else {
+        let value = String(decoding: line, as: UTF8.self)
+        if value.contains("-->") {
+          sawTiming = true
+          let fields = value.components(separatedBy: "-->")
+          if fields.count == 2,
+             let start = stamp(fields[0].trimmingCharacters(in: .whitespaces)),
+             let endString = fields[1].trimmingCharacters(in: .whitespaces).split(separator: " ").first,
+             let end = stamp(String(endString)), start.isFinite, end.isFinite, end > start {
+            timing = (start, end)
+          }
+        }
+      }
+    }
+    var start = 0, index = 0
+    while index < bytes.count {
+      if index % (64 * 1024) == 0 { try request.check() }
+      if bytes[index] == 10 || bytes[index] == 13 {
+        try consumeLine(bytes[start..<index])
+        if bytes[index] == 13, index + 1 < bytes.count, bytes[index + 1] == 10 { index += 1 }
+        start = index + 1
+      }
+      index += 1
+    }
+    // A trailing single newline is part of the old caption text semantics;
+    // unlike an internal empty line it is not a two-newline block separator.
+    if start == bytes.count, sawTiming {
+      if captionLines > 0 {
+        guard caption.count < maximumCueBytes else { throw LibraryFailure.app("subtitle_load_failed") }
+        caption.append(10)
+      }
+      captionLines += 1
+    } else { try consumeLine(bytes[start..<bytes.count]) }
+    try finishBlock()
+    guard !parsed.isEmpty else { throw LibraryFailure.app("subtitle_timeline_invalid") }
+    try request.check()
+    let result = SubtitleTimeline(parsed.sorted { $0.start < $1.start })
+    try request.check()
+    return result
+  }
 }
 
 final class PlaybackService: NSObject {
@@ -404,7 +564,7 @@ final class PlaybackService: NSObject {
         && pip?.isPictureInPicturePossible == true))
   }
   private var pipRequesting: Bool {
-    mediaKitPiPPreparing || mediaKitPiP != nil || mediaKitPiPRestoring
+    mediaKitPiPPreparing || mediaKitPiP != nil || mediaKitPiPRestoring || deferredMediaKitVideoRestore != nil
       || avPlayerPiPRequest != nil || pipStartIssued
       || pipActive || retiringPiP.keys.contains { !unconfirmedPiPStops.contains($0) }
   }
@@ -469,6 +629,8 @@ final class PlaybackService: NSObject {
   private var mediaKitPiPActiveRequestID: String?
   private var mediaKitPiPPreparationTimeout: DispatchWorkItem?
   private var mediaKitPiPRestoring = false
+  private var mediaKitPiPRestoreRequestID: String?
+  private var deferredMediaKitVideoRestore: (engine: LeeMediaKitEngine, generation: Int, requestID: String?)?
   private var mediaKitPiPRestoreTimeout: DispatchWorkItem?
   private var retiringPiP: [ObjectIdentifier: (controller: AVPictureInPictureController,
     renderer: MediaKitPiPRenderer?, requiresTerminal: Bool)] = [:]
@@ -486,7 +648,7 @@ final class PlaybackService: NSObject {
   }
   private var presentationWaiting: Bool {
     if deferredPresentationLoad != nil && blockingRetiringPiP { return true }
-    if mediaKitPiPRestoring { return true }
+    if mediaKitPiPRestoring || deferredMediaKitVideoRestore != nil { return true }
     guard let engine = mediaKit else { return false }
     return retiringPiPRestores.values.contains { $0.generation == generation && $0.engine === engine }
   }
@@ -968,7 +1130,9 @@ final class PlaybackService: NSObject {
   private var bPoint: Double?
   private var sleepUntil: Date?
   private var sleepTimer: Timer?
-  private var cues: [SubtitleCue] = []
+  private var subtitleTimeline = SubtitleTimeline()
+  private let subtitleQueue = DispatchQueue(label: "lei.player.subtitle", qos: .userInitiated)
+  private var subtitleLoad: (request: SubtitleParseRequest, done: (String?) -> Void)?
   private var subtitleName = ""
   private var subtitleText = ""
   private var audioOptions: [AVMediaSelectionOption] = []
@@ -1030,6 +1194,9 @@ final class PlaybackService: NSObject {
     })
     notifications.append(center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
       self?.nativePlaybackTiming.clearTickBaseline()
+      if let self, let engine = self.mediaKit, let requestID = self.mediaKitPiPRestoreRequestID {
+        _ = self.deferMediaKitVideoOutput(engineID: engine.id, requestID: requestID)
+      }
       self?.discardUnrequestedAVPlayerPiP()
       self?.recordLifecycle("willResignActive: presentation preserved")
     })
@@ -1052,6 +1219,7 @@ final class PlaybackService: NSObject {
       self.inBackground = false
       self.nativePlaybackTiming.clearTickBaseline()
       self.recordLifecycle("didBecomeActive")
+      self.resumeDeferredMediaKitVideoOutput()
       self.ensureAVPlayerPresentation(reason: "didBecomeActive")
       if self.audioRecoveryPending { self.attemptAudioRecovery() }
       self.tick()
@@ -1074,6 +1242,7 @@ final class PlaybackService: NSObject {
   }
 
   deinit {
+    cancelSubtitleLoad()
     assetPreparationTask?.cancel()
     sleepTimer?.invalidate()
     heartbeat?.invalidate()
@@ -1248,6 +1417,9 @@ final class PlaybackService: NSObject {
   private func deferPresentationLoad(resume: Bool, autoplay: Bool, clearOnly: Bool) {
     generation += 1
     let token = generation
+    deferredMediaKitVideoRestore = nil
+    cancelSubtitleLoad()
+    guard generation == token else { return }
     cancelAudioRecovery(); cancelIntroDetection(); cancelSeeks()
     assetPreparationTask?.cancel(); assetPreparationTask = nil
     openingTimeout?.cancel()
@@ -1274,6 +1446,9 @@ final class PlaybackService: NSObject {
     }
     generation += 1
     let token = generation
+    deferredMediaKitVideoRestore = nil
+    cancelSubtitleLoad()
+    guard generation == token else { return }
     cancelAudioRecovery(); cancelIntroDetection(); cancelSeeks()
     assetPreparationTask?.cancel(); assetPreparationTask = nil
     openingTimeout?.cancel()
@@ -1345,6 +1520,9 @@ final class PlaybackService: NSObject {
     guard let path = currentPath else { return }
     generation += 1
     let token = generation
+    deferredMediaKitVideoRestore = nil
+    cancelSubtitleLoad()
+    guard generation == token else { return }
     if currentSessionPositionRestore?.targetGeneration != token {
       currentSessionPositionRestore = nil
     }
@@ -1383,7 +1561,7 @@ final class PlaybackService: NSObject {
     installedAVPlayerItem = nil
     player.replaceCurrentItem(with: nil)
     aPoint = nil; bPoint = nil
-    cues = []; subtitleName = ""; subtitleText = ""; surface?.caption.text = ""; surface?.caption.isHidden = true
+    subtitleTimeline = SubtitleTimeline(); subtitleName = ""; subtitleText = ""; surface?.caption.text = ""; surface?.caption.isHidden = true
     audioOptions = []; subtitleOptions = []; selectedAudio = -1; selectedSubtitle = -1
     guard let transport = mediaKitTransport else { fail("playback_channel_unavailable"); return }
     scheduleOpenTimeout(token: token)
@@ -2202,8 +2380,7 @@ final class PlaybackService: NSObject {
       completion("track_selection_stale"); return
     }
     guard let engine = mediaKit else {
-      do { try loadSubtitle(path: path); completion(nil) }
-      catch { completion((error as? LibraryFailure)?.code ?? "subtitle_load_failed") }
+      loadSubtitle(path: path, completion: completion)
       return
     }
     guard !controlBusy, trackSelection == nil else { completion("subtitle_switch_busy"); return }
@@ -2218,7 +2395,7 @@ final class PlaybackService: NSObject {
         self.controlBusy = false
         guard self.generation == token, self.mediaKit === engine else { completion("control_superseded"); return }
         if success {
-          self.cues = []; self.subtitleName = url.lastPathComponent
+          self.subtitleTimeline = SubtitleTimeline(); self.subtitleName = url.lastPathComponent
           self.surface?.caption.isHidden = true; self.publish()
         }
         completion(success ? nil : "subtitle_load_failed")
@@ -2270,7 +2447,7 @@ final class PlaybackService: NSObject {
     }
     // External files keep their original movie timestamps; embedded tracks were rebased with the asset.
     let subtitlePosition = position + timelineOrigin
-    let text = cues.first(where: { $0.start <= subtitlePosition && subtitlePosition < $0.end })?.text ?? ""
+    let text = subtitleTimeline.text(at: subtitlePosition)
     if subtitleText != text { subtitleText = text; surface?.caption.text = text; surface?.caption.isHidden = text.isEmpty }
     if wantsPlayback && !scrubbing && !isSeeking && Date().timeIntervalSince(lastSave) >= 5 { persist() }
     publish()
@@ -2322,6 +2499,9 @@ final class PlaybackService: NSObject {
     currentSessionPositionRestore = nil
     generation += 1
     let token = generation
+    deferredMediaKitVideoRestore = nil
+    cancelSubtitleLoad()
+    guard generation == token else { return }
     seekFault = true; timelineReady = false
     decoderRecoveryRequest = nil
     revokeManualPiP(enforce: false)
@@ -2503,6 +2683,7 @@ final class PlaybackService: NSObject {
     guard ["audio", "subtitle"].contains(kind), trackSelection == nil else {
       throw LibraryFailure.app("track_request_invalid")
     }
+    if kind == "subtitle" { cancelSubtitleLoad() }
     let disabled = kind == "subtitle" && index == -1 && id == nil
     guard disabled || index >= 0 else { throw LibraryFailure.app("track_request_invalid") }
     if let mediaKit = mediaKit {
@@ -2522,7 +2703,7 @@ final class PlaybackService: NSObject {
     trackSelection = nil
     mediaKit?.recordDiagnostic("track \(error == nil ? "confirmed" : "unconfirmed") session=\(request.generation) kind=\(request.kind) id=\(request.id ?? "off")")
     if error == nil && request.kind == "subtitle" {
-      cues = []; subtitleName = ""; subtitleText = ""
+      subtitleTimeline = SubtitleTimeline(); subtitleName = ""; subtitleText = ""
       surface?.caption.text = ""; surface?.caption.isHidden = true
     }
     request.done(error)
@@ -2558,7 +2739,7 @@ final class PlaybackService: NSObject {
   private func selectTrack(kind: String, index: Int) throws {
     if let mediaKit = mediaKit {
       guard mediaKit.select(kind: kind, index: index) else { throw LibraryFailure.app("track_selection_stale") }
-      if kind == "subtitle" { cues = []; subtitleName = ""; surface?.caption.text = ""; surface?.caption.isHidden = true }
+      if kind == "subtitle" { subtitleTimeline = SubtitleTimeline(); subtitleName = ""; surface?.caption.text = ""; surface?.caption.isHidden = true }
       publish(); return
     }
     guard let item = player.currentItem else { return }
@@ -2573,44 +2754,57 @@ final class PlaybackService: NSObject {
       for (i, track) in fallback.enumerated() { track.isEnabled = i == index }
     }
     if kind == "audio" { selectedAudio = index }
-    else { selectedSubtitle = index; cues = []; subtitleName = ""; surface?.caption.text = "" }
+    else { selectedSubtitle = index; subtitleTimeline = SubtitleTimeline(); subtitleName = ""; surface?.caption.text = "" }
     publish()
   }
 
-  private func loadSubtitle(path: String) throws {
-    guard trackSelection == nil else { throw LibraryFailure.app("subtitle_switch_busy") }
-    let url = try library.url(path)
-    library.scheduleProtectionNormalization(paths: [path])
-    let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-    guard size <= 10 * 1024 * 1024 else { throw LibraryFailure.app("subtitle_too_large") }
-    guard mediaKit == nil else { throw LibraryFailure.app("subtitle_load_failed") }
-    guard ["srt", "vtt"].contains(url.pathExtension.lowercased()) else {
-      throw LibraryFailure.app("subtitle_format_unsupported")
-    }
-    let text = try String(contentsOf: url, encoding: .utf8)
-      .replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
-    func stamp(_ value: String) -> Double? {
-      let pieces = value.replacingOccurrences(of: ",", with: ".").split(separator: ":").compactMap { Double($0) }
-      if pieces.count == 3 { return pieces[0] * 3600 + pieces[1] * 60 + pieces[2] }
-      if pieces.count == 2 { return pieces[0] * 60 + pieces[1] }
-      return nil
-    }
-    var parsed: [SubtitleCue] = []
-    for block in text.components(separatedBy: "\n\n") {
-      let lines = block.components(separatedBy: "\n")
-      guard let i = lines.firstIndex(where: { $0.contains("-->") }), i + 1 < lines.count else { continue }
-      let fields = lines[i].components(separatedBy: "-->")
-      guard fields.count == 2,
-        let start = stamp(fields[0].trimmingCharacters(in: .whitespaces)),
-        let endString = fields[1].trimmingCharacters(in: .whitespaces).split(separator: " ").first,
-        let end = stamp(String(endString)), end > start else { continue }
-      let caption = lines[(i + 1)...].joined(separator: "\n").replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-      parsed.append(SubtitleCue(start: start, end: end, text: caption))
-    }
-    guard !parsed.isEmpty else { throw LibraryFailure.app("subtitle_timeline_invalid") }
-    if detectingIntro { seek(position) }
-    try selectTrack(kind: "subtitle", index: -1)
-    cues = parsed.sorted { $0.start < $1.start }; subtitleName = URL(fileURLWithPath: path).lastPathComponent; publish()
+  private func cancelSubtitleLoad() {
+    let request = subtitleLoad
+    subtitleLoad = nil
+    request?.request.cancel()
+    request?.done("control_superseded")
+  }
+
+  private func loadSubtitle(path: String, completion: @escaping (String?) -> Void) {
+    guard trackSelection == nil else { completion("subtitle_switch_busy"); return }
+    do {
+      let url = try library.url(path)
+      guard ["srt", "vtt"].contains(url.pathExtension.lowercased()) else {
+        throw LibraryFailure.app("subtitle_format_unsupported")
+      }
+      library.scheduleProtectionNormalization(paths: [path])
+      cancelSubtitleLoad()
+      let request = SubtitleParseRequest()
+      let token = generation
+      subtitleLoad = (request, completion)
+      // The queue is serial: at most one file/data/cue graph is parsed at once.
+      // Superseded queued work checks its cancellation before reading any bytes.
+      subtitleQueue.async { [weak self] in
+        let parsed = Result { try ExternalSubtitleParser.read(url, request: request) }
+        DispatchQueue.main.async { [weak self] in
+          guard let self, self.subtitleLoad?.request === request else { return }
+          let done = self.subtitleLoad!.done
+          self.subtitleLoad = nil
+          guard self.generation == token, self.mediaKit == nil, self.timelineReady,
+                !self.seekFault, self.currentPath != nil, self.trackSelection == nil else {
+            done("control_superseded"); return
+          }
+          do {
+            try request.check()
+            let timeline = try parsed.get()
+            // A deleted or moved subtitle must not appear after its file vanished.
+            guard FileManager.default.fileExists(atPath: url.path) else {
+              throw LibraryFailure.app("subtitle_load_failed")
+            }
+            if self.detectingIntro { self.seek(self.position) }
+            try self.selectTrack(kind: "subtitle", index: -1)
+            self.subtitleTimeline = timeline
+            self.subtitleName = url.lastPathComponent
+            self.publish(); done(nil)
+          } catch { done((error as? LibraryFailure)?.code ?? "subtitle_load_failed") }
+        }
+      }
+    } catch { completion((error as? LibraryFailure)?.code ?? "subtitle_load_failed") }
   }
 
   func stopForMutation(_ path: String) {
@@ -2619,6 +2813,9 @@ final class PlaybackService: NSObject {
     resetCurrentSessionCheckpoint()
     generation += 1
     let token = generation
+    deferredMediaKitVideoRestore = nil
+    cancelSubtitleLoad()
+    guard generation == token else { return }
     finishTrackSelection("track_selection_stale")
     guard generation == token else { return }
     assetPreparationTask?.cancel(); assetPreparationTask = nil
@@ -2626,7 +2823,7 @@ final class PlaybackService: NSObject {
     guard generation == token else { return }
     clearBoundary(); openingTimeout?.cancel()
     timelineReady = false; timelineOrigin = 0
-    queue = []; index = 0; aPoint = nil; bPoint = nil; cues = []; loading = false
+    queue = []; index = 0; aPoint = nil; bPoint = nil; subtitleTimeline = SubtitleTimeline(); loading = false
     sessionCompleted = false; atPlaybackEnd = false; pendingEndAction = false
     subtitleName = ""; subtitleText = ""; surface?.caption.text = ""; surface?.caption.isHidden = true
     sleepTimer?.invalidate(); sleepTimer = nil; sleepUntil = nil; errorMessage = ""
@@ -2851,7 +3048,8 @@ final class PlaybackService: NSObject {
       throw LibraryFailure.app("pip_unsupported")
     }
     if let mediaKit = mediaKit {
-      guard !mediaKitPiPPreparing, mediaKitPiP == nil, !mediaKitPiPRestoring else {
+      guard !mediaKitPiPPreparing, mediaKitPiP == nil, !mediaKitPiPRestoring,
+            deferredMediaKitVideoRestore == nil else {
         throw LibraryFailure.app("pip_busy")
       }
       guard let requestID = requestID, !requestID.isEmpty else {
@@ -3438,40 +3636,94 @@ final class PlaybackService: NSObject {
     }
   }
 
+  /// Dart also reports deferral when it loses foreground after the native
+  /// request, including PiP failure/abort rollback paths initiated by Dart.
+  func deferMediaKitVideoOutput(engineID: String, requestID: String?) -> Bool {
+    guard let engine = mediaKit, engine.id == engineID,
+          timelineReady, !seekFault, currentPath != nil,
+          mediaKitPiP == nil, !mediaKitPiPPreparing, !blockingRetiringPiP,
+          pendingReplacement == nil, deferredPresentationLoad == nil else { return false }
+    if let requestID {
+      // willResignActive can suspend this attempt before Dart reports the same
+      // deferral. A duplicate receipt must not consume a newer attempt.
+      if deferredMediaKitVideoRestore?.requestID == requestID,
+         deferredMediaKitVideoRestore?.generation == generation { return true }
+      guard mediaKitPiPRestoreRequestID == requestID else { return false }
+    } else if mediaKitPiPRestoring { return false }
+    mediaKitPiPRestoreTimeout?.cancel(); mediaKitPiPRestoreTimeout = nil
+    mediaKitPiPRestoring = false; mediaKitPiPRestoreRequestID = nil
+    deferredMediaKitVideoRestore = (engine, generation, requestID)
+    // Preserve wantsPlayback. X already paused via finishPiPPlaybackSession;
+    // restore/rollback must not replay an old autoplay decision later.
+    pauseEngine()
+    publish()
+    return true
+  }
+
+  func resumeDeferredMediaKitVideoOutput(engineID: String? = nil) {
+    guard let pending = deferredMediaKitVideoRestore else { return }
+    guard pending.generation == generation, pending.engine === mediaKit else {
+      deferredMediaKitVideoRestore = nil; return
+    }
+    guard engineID == nil || engineID == pending.engine.id,
+          UIApplication.shared.applicationState == .active,
+          mediaKitPiP == nil, !mediaKitPiPPreparing, !blockingRetiringPiP,
+          pendingReplacement == nil, deferredPresentationLoad == nil else { return }
+    restoreMediaKitVideoOutput()
+  }
+
   private func restoreMediaKitVideoOutput() {
     guard !mediaKitPiPRestoring else { return }
-    guard let mediaKit = mediaKit else { mediaKitPiPRestoring = false; publish(); return }
+    guard let mediaKit = mediaKit else {
+      deferredMediaKitVideoRestore = nil; publish(); return
+    }
+    guard mediaKitPiP == nil, !blockingRetiringPiP,
+          pendingReplacement == nil, deferredPresentationLoad == nil else { return }
+    guard UIApplication.shared.applicationState == .active else {
+      _ = deferMediaKitVideoOutput(engineID: mediaKit.id, requestID: nil)
+      return
+    }
+    deferredMediaKitVideoRestore = nil
     let token = generation
+    let requestID = UUID().uuidString
+    mediaKitPiPRestoreRequestID = requestID
     pauseEngine()
     mediaKitPiPRestoring = true
     mediaKitPiPRestoreTimeout?.cancel()
     let timeout = DispatchWorkItem { [weak self, weak mediaKit] in
       guard let self = self, let mediaKit = mediaKit, self.mediaKit === mediaKit,
-            self.generation == token, self.mediaKitPiPRestoring else { return }
+            self.generation == token, self.mediaKitPiPRestoreRequestID == requestID else { return }
       self.mediaKitPiPRestoreTimeout = nil
-      self.recoverMediaKitVideoOutput()
+      if UIApplication.shared.applicationState != .active {
+        _ = self.deferMediaKitVideoOutput(engineID: mediaKit.id, requestID: requestID)
+      } else { self.recoverMediaKitVideoOutput() }
     }
     mediaKitPiPRestoreTimeout = timeout
     DispatchQueue.main.asyncAfter(deadline: .now() + 24, execute: timeout)
     publish()
-    mediaKit.restoreVideoOutput { [weak self, weak mediaKit] success in
+    mediaKit.restoreVideoOutput(requestID: requestID) { [weak self, weak mediaKit] success in
       DispatchQueue.main.async {
         guard let self = self, let mediaKit = mediaKit, self.mediaKit === mediaKit,
-              self.generation == token, self.mediaKitPiPRestoring else { return }
+              self.generation == token, self.mediaKitPiPRestoreRequestID == requestID else { return }
         self.mediaKitPiPRestoreTimeout?.cancel()
         self.mediaKitPiPRestoreTimeout = nil
+        if !success && UIApplication.shared.applicationState != .active {
+          _ = self.deferMediaKitVideoOutput(engineID: mediaKit.id, requestID: requestID)
+          return
+        }
         self.mediaKitPiPRestoring = false
+        self.mediaKitPiPRestoreRequestID = nil
         if success {
           self.resumeHealthyPlaybackAfterPiPStop()
           self.publish()
-        } else {
-          self.recoverMediaKitVideoOutput()
-        }
+        } else { self.recoverMediaKitVideoOutput() }
       }
     }
   }
 
   private func recoverMediaKitVideoOutput() {
+    mediaKitPiPRestoreRequestID = nil
+    deferredMediaKitVideoRestore = nil
     mediaKitPiPRestoreTimeout?.cancel()
     mediaKitPiPRestoreTimeout = nil
     mediaKitPiPRestoring = false
@@ -3565,6 +3817,8 @@ final class PlaybackService: NSObject {
   }
 
   private func discardMediaKitPiP() {
+    mediaKitPiPRestoreRequestID = nil
+    deferredMediaKitVideoRestore = nil
     mediaKitPiPPreparationTimeout?.cancel()
     mediaKitPiPPreparationTimeout = nil
     mediaKitPiPRestoreTimeout?.cancel()

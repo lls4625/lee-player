@@ -50,6 +50,10 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
   int _releaseOperations = 0;
   String? _pipPreviousSwFast;
   String? _pipVideoTrack;
+  String? _deferredPiPRestoreId;
+  bool _pipInlineOutputDetached = false;
+  bool _pipRestoreCreateIssued = false;
+  int? _pipRestorePreviousTextureId;
   String _failure = '';
   Map<String, dynamic> _diagnostics = {};
   MediaKitPlaybackMeasurements? _measurements;
@@ -62,6 +66,7 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       final player = _player;
       if (player != null) _scheduleVideoAttachment(player, engineId);
+      _notifyPiPRestoreForeground();
     } else {
       // A foreground open waiting for its first frame can still become an
       // audio-only background open. Do not leave it waiting on a hidden UI.
@@ -125,32 +130,76 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
   };
 
 
-  Future<void> _createVideoOutput(Player player) async {
-    final id = engineId;
+  bool get _foregroundVideoAllowed =>
+      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+
+  void _notifyPiPRestoreForeground() {
+    final id = _deferredPiPRestoreId;
+    if (id == null || id != _requestedId || !_foregroundVideoAllowed || _disposed) return;
+    unawaited(_channel.invokeMethod<void>('pipRestoreForeground', {'engineId': id})
+        .catchError((Object error) { _log('pip foreground notification failed: $error'); }));
+  }
+
+  Future<void> _deferPiPVideoOutput(Player player, String id, String? requestId) async {
+    if (!_sameSession(player, id)) return;
+    final accepted = await _channel.invokeMethod<bool>('pipRestoreDeferred', {
+      'engineId': id, if (requestId != null) 'requestId': requestId,
+    }).timeout(const Duration(seconds: 2)) ?? false;
+    if (!_sameSession(player, id)) return;
+    if (!accepted) throw StateError('PiP output deferral was superseded');
+    _deferredPiPRestoreId = id;
+    _log('inline PiP output deferred until foreground');
+    // Native and Flutter lifecycle notifications can arrive in either order.
+    // A resumed event that happened while this receipt was in flight is enough.
+    _notifyPiPRestoreForeground();
+  }
+
+  Future<bool> _createVideoOutput(Player player, String id,
+      MediaKitCommandPermit? permit) async {
+    bool current() => _sameSession(player, id) && (permit?.isValid ?? true);
     final videoController = controller;
     if (videoController == null) throw StateError('Flutter video controller was released');
+    if (!current()) throw StateError('Playback session changed');
+    if (!_foregroundVideoAllowed) return false;
     final handle = await player.handle;
-    if (_requestedId != id || _player != player || _disposed) {
-      throw StateError('Playback session changed');
+    if (!current()) throw StateError('Playback session changed');
+    if (!_foregroundVideoAllowed) return false;
+    if (!_pipRestoreCreateIssued) {
+      _pipRestorePreviousTextureId = videoController.id.value;
+      _pipRestoreCreateIssued = true;
+      try {
+        await _videoChannel.invokeMethod<void>('VideoOutputManager.Create', {
+          'handle': '$handle',
+          // Opt-in: leave the established headless-open attachment path alone.
+          'requireForeground': true,
+          'configuration': const {
+            'width': 'null', 'height': 'null', 'enableHardwareAcceleration': true,
+          },
+        }).timeout(const Duration(seconds: 4));
+      } on PlatformException catch (error) {
+        if (!current()) throw StateError('Playback session changed');
+        if (error.code != 'video_output_background') rethrow;
+        _pipRestoreCreateIssued = false;
+        return false;
+      }
     }
-    final previousTextureId = videoController.id.value;
-    await _videoChannel.invokeMethod<void>('VideoOutputManager.Create', {
-      'handle': '$handle',
-      'configuration': const {
-        'width': 'null', 'height': 'null', 'enableHardwareAcceleration': true,
-      },
-    }).timeout(const Duration(seconds: 4));
-    if (!await _waitForVideoTexture(videoController, id, previousTextureId)) {
+    if (!await _waitForVideoTexture(videoController, id, _pipRestorePreviousTextureId)) {
+      if (current() && !_foregroundVideoAllowed) return false;
       throw StateError('Flutter video output could not be recreated');
     }
-    if (_requestedId != id || _player != player || _disposed) throw StateError('Playback session changed');
+    if (!current()) throw StateError('Playback session changed');
+    if (!_foregroundVideoAllowed) return false;
     await _restoreVideoTrack(player.platform as NativePlayer);
     final deadline = Stopwatch()..start();
-    while (deadline.elapsed < const Duration(seconds: 12) && _requestedId == id && !_disposed) {
+    while (deadline.elapsed < const Duration(seconds: 12) && current()) {
+      if (!_foregroundVideoAllowed) return false;
       final rect = videoController.rect.value;
       if (rect != null && rect.width > 0 && rect.height > 0) {
         _log('restored video output dimensions=${rect.width}x${rect.height}');
-        return;
+        _pipInlineOutputDetached = false;
+        _pipRestoreCreateIssued = false;
+        _deferredPiPRestoreId = null;
+        return true;
       }
       await Future<void>.delayed(const Duration(milliseconds: 50));
     }
@@ -475,6 +524,9 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
             return false;
           }
           handoffBegan = true;
+          _pipInlineOutputDetached = true;
+          _pipRestoreCreateIssued = false;
+          _deferredPiPRestoreId = null;
           await _videoChannel.invokeMethod<void>('VideoOutputManager.Dispose', {'handle': '$handle'});
           if (!_allows(permit, id, player)) {
             if (_sameSession(player, id)) {
@@ -526,13 +578,14 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
           Error.throwWithStackTrace(error, stackTrace);
         } finally {
           if (wasPlaying && _playIntent.value != false && _failure.isEmpty &&
-              _sameSession(player, id)) {
+              _deferredPiPRestoreId != id && _sameSession(player, id)) {
             if (_playIntent.value == null) _playIntent.record(true);
             _scheduleLatestPlayIntent(player, id);
           }
         }
       case 'pipRestore':
-        await _restorePiPVideoOutput(player, native, id);
+        await _restorePiPVideoOutput(player, native, id,
+            requestId: args['requestId'] as String?, permit: permit);
         break;
       case 'loop':
         final start = (args['from'] as num).toDouble(), end = (args['to'] as num).toDouble();
@@ -625,14 +678,23 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _restorePiPVideoOutput(
-      Player player, NativePlayer native, String id) async {
-    if (_disposed || _requestedId != id || _player != player) return;
+      Player player, NativePlayer native, String id,
+      {String? requestId, MediaKitCommandPermit? permit}) async {
+    bool current() => _sameSession(player, id) && (permit?.isValid ?? true);
+    if (!current() || !_pipInlineOutputDetached) return;
+    if (!_foregroundVideoAllowed) {
+      await _deferPiPVideoOutput(player, id, requestId);
+      return;
+    }
     try {
       await _restorePiPRenderingMode(native, player, id);
     } catch (error) { _log('pip mode restore failed: $error'); }
-    if (_disposed || _requestedId != id || _player != player) return;
-    await _createVideoOutput(player);
-    if (_pipPreviousSwFast != null && !_disposed && _requestedId == id && _player == player) {
+    if (!current()) return;
+    if (!await _createVideoOutput(player, id, permit)) {
+      await _deferPiPVideoOutput(player, id, requestId);
+      return;
+    }
+    if (_pipPreviousSwFast != null && current()) {
       try { await _restorePiPRenderingMode(native, player, id); }
       catch (error) { _log('pip mode restore retry failed: $error'); }
     }
@@ -657,7 +719,7 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
       VideoController videoController, String id, int? previousTextureId) async {
     final elapsed = Stopwatch()..start();
     while (elapsed.elapsed < const Duration(seconds: 8) &&
-        !_disposed && !_releasing && _requestedId == id) {
+        !_disposed && !_releasing && _requestedId == id && _foregroundVideoAllowed) {
       final textureId = videoController.id.value;
       final rect = videoController.rect.value;
       if (textureId != null && textureId != previousTextureId) {
@@ -1248,6 +1310,10 @@ class MediaKitPlayback extends ChangeNotifier with WidgetsBindingObserver {
     _timedOutProperties.clear();
     _pipPreviousSwFast = null;
     _pipVideoTrack = null;
+    _deferredPiPRestoreId = null;
+    _pipInlineOutputDetached = false;
+    _pipRestoreCreateIssued = false;
+    _pipRestorePreviousTextureId = null;
     timer?.cancel();
     if (!_disposed) notifyListeners();
     if (player != null || subscriptions.isNotEmpty) {

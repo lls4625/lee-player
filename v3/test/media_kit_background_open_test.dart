@@ -24,6 +24,10 @@ void main() {
   late int Function(Pointer<Void>) videoSelected, earlyVideoEnables;
   late void Function(Pointer<Void>, int) renderReady;
   var delayRenderReady = false;
+  var restoreDimensions = false;
+  var rejectRestoreCreate = false;
+  var backgroundAfterRestoreCreate = false;
+  var failPiPReadyInBackground = false;
   late Pointer<Utf8> Function(Pointer<Void>, int, int) argument;
   late Pointer<Utf8> Function(Pointer<Void>) videoTrack;
   late MediaKitPlayback playback;
@@ -66,7 +70,7 @@ void main() {
     renderReady(Pointer<Void>.fromAddress(handle), 1);
     await incoming(video, 'VideoOutput.Resize', {
       'handle': handle, 'id': nextTexture++,
-      'rect': {'left': 0, 'top': 0, 'width': 0, 'height': 0},
+      'rect': {'left': 0, 'top': 0, 'width': restoreDimensions ? 640 : 0, 'height': restoreDimensions ? 360 : 0},
     });
   }
 
@@ -150,10 +154,21 @@ void main() {
     nativeCalls.clear();
     outputs.clear();
     delayRenderReady = false;
+    restoreDimensions = false;
+    rejectRestoreCreate = false;
+    backgroundAfterRestoreCreate = false;
+    failPiPReadyInBackground = false;
     binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
       call,
     ) async {
       nativeCalls.add(call.method);
+      if (call.method == 'pipReady') {
+        if (failPiPReadyInBackground) {
+          binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+          return false;
+        }
+        renderReady(Pointer<Void>.fromAddress((call.arguments as Map)['handle'] as int), 1);
+      }
       if (call.method == 'state')
         states.add(Map<dynamic, dynamic>.from(call.arguments as Map));
       return true;
@@ -163,9 +178,17 @@ void main() {
     ) async {
       nativeCalls.add(call.method);
       if (call.method == 'VideoOutputManager.Create') {
+        final restoring = (call.arguments as Map)['requireForeground'] == true;
+        if (restoring && rejectRestoreCreate) {
+          binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+          throw PlatformException(code: 'video_output_background');
+        }
         final handle = int.parse((call.arguments as Map)['handle'] as String);
         outputs.add(handle);
         if (!delayRenderReady) await acknowledgeRenderContext(handle);
+        if (restoring && backgroundAfterRestoreCreate) {
+          binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        }
       }
       if (call.method == 'VideoOutputManager.Dispose') {
         final handle = int.parse((call.arguments as Map)['handle'] as String);
@@ -595,6 +618,148 @@ void main() {
       expect(await open('new-after-release'), isTrue);
       expect(lastContext(), isNot(ctx));
       expect(playback.engineId, 'new-after-release');
+    });
+    await cleanup(tester);
+  });
+
+  Future<void> prepareInlinePiP(WidgetTester tester, String id) async {
+    await tester.runAsync(() async {
+      expect(await open(id), isTrue);
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    });
+    await frame(tester);
+    await tester.runAsync(() async {
+      await playback.controller!.platform.future.timeout(const Duration(seconds: 2));
+      expect(await incoming(bridge, 'pip', {
+        'engineId': id, 'requestId': 'pip-$id',
+      }), isTrue);
+      restoreDimensions = true;
+    });
+  }
+
+  testWidgets('background PiP close defers output and foreground restores the same paused player once', (tester) async {
+    const id = 'pip-background-close';
+    await prepareInlinePiP(tester, id);
+    await tester.runAsync(() async {
+      final ctx = lastContext();
+      final count = created();
+      final loaded = commands(ctx).where((x) => x == 'loadlist').length;
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      expect(await incoming(bridge, 'pause', {'engineId': id}), isTrue);
+      for (var i = 0; i < 2; i++) {
+        expect(await incoming(bridge, 'pipRestore', {
+          'engineId': id, 'requestId': 'background-$i',
+        }), isTrue);
+      }
+      expect(outputs, [ctx.address]);
+      expect(nativeCalls.where((x) => x == 'pipRestoreDeferred').length, 2);
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      expect(await incoming(bridge, 'pipRestore', {
+        'engineId': id, 'requestId': 'foreground',
+      }), isTrue);
+      expect(await incoming(bridge, 'pipRestore', {
+        'engineId': id, 'requestId': 'duplicate-foreground',
+      }), isTrue);
+      expect(outputs, [ctx.address, ctx.address]);
+      expect(created(), count);
+      expect(commands(ctx).where((x) => x == 'loadlist').length, loaded);
+      expect(commands(ctx), isNot(contains('seek')));
+      expect(pauseValue(ctx), 1);
+      expect(nativeCalls, contains('pipRestoreForeground'));
+    });
+    await cleanup(tester);
+  });
+
+  testWidgets('background native Create rejection is deferred and retry does not poison playback', (tester) async {
+    const id = 'pip-native-admission';
+    await prepareInlinePiP(tester, id);
+    await tester.runAsync(() async {
+      rejectRestoreCreate = true;
+      expect(await incoming(bridge, 'pipRestore', {
+        'engineId': id, 'requestId': 'native-background',
+      }), isTrue);
+      expect(outputs.length, 1);
+      expect(states.last['failure'], isEmpty);
+      expect(nativeCalls, contains('pipRestoreDeferred'));
+      rejectRestoreCreate = false;
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      expect(await incoming(bridge, 'pipRestore', {
+        'engineId': id, 'requestId': 'native-foreground',
+      }), isTrue);
+      expect(outputs.length, 2);
+      expect(pauseValue(lastContext()), 1);
+    });
+    await cleanup(tester);
+  });
+
+  testWidgets('accepted Create followed by background reuses its texture on foreground', (tester) async {
+    const id = 'pip-create-lifecycle-race';
+    await prepareInlinePiP(tester, id);
+    await tester.runAsync(() async {
+      backgroundAfterRestoreCreate = true;
+      expect(await incoming(bridge, 'pipRestore', {
+        'engineId': id, 'requestId': 'race-before-background',
+      }), isTrue);
+      expect(outputs.length, 2);
+      expect(nativeCalls, contains('pipRestoreDeferred'));
+      backgroundAfterRestoreCreate = false;
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      expect(await incoming(bridge, 'pipRestore', {
+        'engineId': id, 'requestId': 'race-after-foreground',
+      }), isTrue);
+      expect(outputs.length, 2, reason: 'accepted native Create cannot be repeated for the same handoff');
+    });
+    await cleanup(tester);
+  });
+
+  testWidgets('new background item discards deferred old PiP restoration', (tester) async {
+    const old = 'pip-old-deferred';
+    await prepareInlinePiP(tester, old);
+    await tester.runAsync(() async {
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+      expect(await incoming(bridge, 'pipRestore', {
+        'engineId': old, 'requestId': 'old-background',
+      }), isTrue);
+      expect(await open('new-after-pip'), isTrue);
+      expect(await incoming(bridge, 'pipRestore', {
+        'engineId': old, 'requestId': 'late-old',
+      }), isFalse);
+      expect(outputs.length, 1);
+      expect(playback.controller, isNull);
+      expect(playback.engineId, 'new-after-pip');
+      expect(await incoming(bridge, 'play', {'engineId': 'new-after-pip'}), isTrue);
+      expect(pauseValue(lastContext()), 0);
+    });
+    await cleanup(tester);
+  });
+
+  testWidgets('failed PiP rollback in background defers without finally resuming stale play intent', (tester) async {
+    const id = 'pip-rollback-background';
+    await tester.runAsync(() async {
+      expect(await open(id), isTrue);
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    });
+    await frame(tester);
+    await tester.runAsync(() async {
+      await playback.controller!.platform.future.timeout(const Duration(seconds: 2));
+      expect(await incoming(bridge, 'play', {'engineId': id}), isTrue);
+      expect(pauseValue(lastContext()), 0);
+      failPiPReadyInBackground = true;
+      expect(await incoming(bridge, 'pip', {
+        'engineId': id, 'requestId': 'rollback-background',
+      }), isFalse);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(outputs.length, 1);
+      expect(pauseValue(lastContext()), 1);
+      expect(nativeCalls, contains('pipRestoreDeferred'));
+      expect(states.last['failure'], isEmpty);
+      restoreDimensions = true;
+      binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      expect(await incoming(bridge, 'pipRestore', {
+        'engineId': id, 'requestId': 'rollback-foreground',
+      }), isTrue);
+      expect(outputs.length, 2);
+      expect(pauseValue(lastContext()), 1, reason: 'only latest native intent may resume playback');
     });
     await cleanup(tester);
   });

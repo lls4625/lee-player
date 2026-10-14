@@ -114,6 +114,18 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
           positionVersion: version.intValue) { result($0) }
         return
       }
+      if call.method == "pipRestoreDeferred" {
+        guard let engineID = arguments["engineId"] as? String else { result(false); return }
+        result(self.playback.deferMediaKitVideoOutput(engineID: engineID,
+          requestID: arguments["requestId"] as? String))
+        return
+      }
+      if call.method == "pipRestoreForeground" {
+        guard let engineID = arguments["engineId"] as? String else { result(false); return }
+        self.playback.resumeDeferredMediaKitVideoOutput(engineID: engineID)
+        result(true)
+        return
+      }
       if call.method == "pipReady" {
         guard let requestID = arguments["requestId"] as? String,
           let pendingToken = self.pendingMediaKitPiPToken,
