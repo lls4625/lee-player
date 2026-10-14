@@ -6,9 +6,11 @@ import 'package:liquid_glass_widgets/liquid_glass_widgets.dart';
 import 'player_model.dart';
 import 'library_page.dart';
 import 'app_localizations.dart';
+import 'app_orientation.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await lockAppMainToPortrait();
   await LiquidGlassWidgets.initialize(enablePerformanceMonitor: false);
   final model = PlayerModel();
   runApp(

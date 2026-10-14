@@ -9,6 +9,7 @@ import 'playback_page.dart';
 import 'developer_tip.dart';
 import 'app_licenses.dart';
 import 'app_localizations.dart';
+import 'app_orientation.dart';
 
 const _privacyPolicyUrl =
     'https://www.wlsp1881.com/leeplayer/privacy-policy.html';
@@ -275,11 +276,16 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      if (!playerVisible) restoreMainOrientation();
       unawaited(m.retryPreferences());
       unawaited(m.reconcileOperations());
       unawaited(m.command('retryRecords', silent: true));
       unawaited(m.refresh());
     }
+  }
+
+  void restoreMainOrientation() {
+    unawaited(lockAppMainToPortrait().catchError((Object _) {}));
   }
 
   @override
@@ -362,6 +368,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     } finally {
       playerNavigationEpoch++;
       playerVisible = false;
+      restoreMainOrientation();
     }
   }
 

@@ -6,6 +6,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'player_model.dart';
 import 'glass_ui.dart';
 import 'app_localizations.dart';
+import 'app_orientation.dart';
 
 String _playbackRateLabel(double rate) {
   final ticks = (rate * 20).round();
@@ -266,6 +267,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
   double? levelValue;
   double levelStart = 0;
   double levelDragDistance = 0;
+  double exitSwipeDistance = 0;
   bool jumping = false;
   int get rewindSeconds => m.number('rewindSeconds', 15).round().clamp(1, 300);
   int get forwardSeconds => m.number('forwardSeconds', 15).round().clamp(1, 300);
@@ -355,7 +357,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
   }
   final videoKey = GlobalKey();
   bool locked = false, controlsVisible = true, rotating = false;
-  bool dismissed = false;
+  bool dismissed = false, exiting = false, exitPopAllowed = false;
   bool pipCommandPending = false;
   static const modes = {'sequence': '顺序播放', 'folder': '文件夹循环', 'one': '单集循环', 'shuffle': '随机播放'};
   @override
@@ -426,6 +428,60 @@ class _PlaybackPageState extends State<PlaybackPage> {
     unawaited(m.command('playerDismissed', silent: true));
   }
 
+  Future<bool> waitForPortraitLayout() async {
+    if (MediaQuery.orientationOf(context) == Orientation.portrait) return true;
+    final deadline = DateTime.now().add(const Duration(seconds: 2));
+    while (mounted && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      if (mounted && MediaQuery.orientationOf(context) == Orientation.portrait) {
+        // Keep the playback route above the library until the system rotation
+        // transition has finished, so the library's first visible frame is
+        // already portrait.
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        return mounted && MediaQuery.orientationOf(context) == Orientation.portrait;
+      }
+    }
+    return false;
+  }
+
+  Future<void> exitPlayback() async {
+    if (exiting || !mounted || (locked && !pipActive)) return;
+    setState(() => exiting = true);
+    try {
+      await lockAppMainToPortrait();
+      if (!mounted || !await waitForPortraitLayout()) {
+        if (mounted) {
+          setState(() => exiting = false);
+          showLeiToast(context, '无法切换屏幕方向');
+        }
+        return;
+      }
+      dismissPlayer();
+      setState(() => exitPopAllowed = true);
+      Navigator.of(context).pop();
+    } catch (_) {
+      if (mounted) {
+        setState(() => exiting = false);
+        showLeiToast(context, '无法切换屏幕方向');
+      }
+    }
+  }
+
+  void startExitSwipe(DragStartDetails _) {
+    exitSwipeDistance = 0;
+  }
+
+  void updateExitSwipe(DragUpdateDetails details) {
+    exitSwipeDistance += details.primaryDelta ?? 0;
+  }
+
+  void finishExitSwipe(DragEndDetails details) {
+    final velocity = details.primaryVelocity ?? 0;
+    final shouldExit = exitSwipeDistance >= 72 || velocity >= 500;
+    exitSwipeDistance = 0;
+    if (shouldExit) unawaited(exitPlayback());
+  }
+
   @override
   void dispose() {
     feedbackTimer?.cancel();
@@ -436,7 +492,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
     if (dragging != null && !endingDrag) m.cancelScrub();
     m.removeListener(changed);
     dismissPlayer();
-    unawaited(SystemChrome.setPreferredOrientations(playbackExitOrientations)
+    unawaited(lockAppMainToPortrait()
       .catchError((Object _) {}));
     super.dispose();
   }
@@ -1166,7 +1222,7 @@ class _PlaybackPageState extends State<PlaybackPage> {
       const IgnorePointer(child: Center(child: GlassProgressIndicator.circular())),
     if (controlsVisible && !locked) Positioned(top: 8, left: 12, right: 12,
       child: Row(children: [
-        playbackButton(const Icon(Icons.arrow_back_ios_new), '返回课程库', () => Navigator.of(context).pop()),
+        playbackButton(const Icon(Icons.arrow_back_ios_new), '返回课程库', exiting ? null : exitPlayback),
         const SizedBox(width: 12),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
           Text(m.path.split('/').last, maxLines: 1,
@@ -1227,8 +1283,18 @@ class _PlaybackPageState extends State<PlaybackPage> {
       // Leave the system's source presentation visible. The permanent pointer
       // gate above blocks input without covering or unmounting either engine.
       Positioned(top: 8, left: 12, child: playbackButton(
-        const Icon(Icons.arrow_back_ios_new), '返回课程库', () => Navigator.of(context).pop())),
+        const Icon(Icons.arrow_back_ios_new), '返回课程库', exiting ? null : exitPlayback)),
     ],
+    if (!exiting && (pipActive || !locked) &&
+        MediaQuery.orientationOf(context) == Orientation.landscape)
+      Positioned(left: 0, top: 64, bottom: 96, width: 28,
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onHorizontalDragStart: startExitSwipe,
+          onHorizontalDragUpdate: updateExitSwipe,
+          onHorizontalDragEnd: finishExitSwipe,
+          onHorizontalDragCancel: () => exitSwipeDistance = 0,
+        )),
   ]);
 
   @override
@@ -1239,16 +1305,24 @@ class _PlaybackPageState extends State<PlaybackPage> {
     child: Builder(builder: (context) => DefaultTextStyle(
       style: Theme.of(context).textTheme.bodyMedium!,
       child: IconTheme(data: const IconThemeData(color: Colors.white),
-        child: PopScope(canPop: pipActive || !locked,
-          onPopInvokedWithResult: (didPop, _) { if (didPop) dismissPlayer(); },
-          child: GlassScaffold(
+        child: PopScope(
+          canPop: exitPopAllowed || (!exiting && (pipActive || !locked) &&
+            MediaQuery.orientationOf(context) == Orientation.portrait),
+          onPopInvokedWithResult: (didPop, _) {
+            if (didPop) {
+              dismissPlayer();
+            } else if (pipActive || !locked) {
+              unawaited(exitPlayback());
+            }
+          },
+          child: AbsorbPointer(absorbing: exiting, child: GlassScaffold(
           background: const ColoredBox(color: Colors.black),
           themeOverride: GlassThemeData.simple(quality: GlassQuality.minimal),
           enableBackgroundSampling: false,
           edgeFade: false, extendBody: false,
           statusBarStyle: GlassStatusBarStyle.light,
           body: SafeArea(child: videoContent(context)),
-        )),
+        ))),
       ),
     )),
   );
