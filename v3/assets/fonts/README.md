@@ -2,8 +2,8 @@
 
 `NotoSansCJKsc-Regular.otf` is the unmodified, single Regular weight from the
 official Noto Sans CJK **Sans2.004** release. It is the full CJK face, not the
-SC regional subset: Simplified Chinese, Traditional Chinese, Japanese kana
-and Latin subtitles share this one face (SC glyph forms are the default).
+SC regional subset: Simplified Chinese, Traditional Chinese, Japanese kana,
+Korean Hangul and Latin subtitles share this one face (SC glyph forms are the default).
 This adds 16,437,364 bytes (15.68 MiB) before application-package compression.
 No other weights or font collections are bundled.
 

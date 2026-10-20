@@ -878,6 +878,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       (AppLanguageMode.zhHans, '简体中文'),
       (AppLanguageMode.zhHant, '繁體中文'),
       (AppLanguageMode.ja, '日文'),
+      (AppLanguageMode.ko, '韩语'),
       (AppLanguageMode.en, '英语'),
     ];
     final localizations = AppLocalizations.of(context);

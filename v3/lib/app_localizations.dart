@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'app_localizations_ko.dart';
+
 class AppMessage {
   const AppMessage(
     this.code, {
@@ -31,7 +33,7 @@ class AppMessage {
   }
 }
 
-enum AppLanguageMode { system, zhHans, zhHant, ja, en }
+enum AppLanguageMode { system, zhHans, zhHant, ja, ko, en }
 
 extension AppLanguageModeValue on AppLanguageMode {
   String get value => switch (this) {
@@ -39,6 +41,7 @@ extension AppLanguageModeValue on AppLanguageMode {
     AppLanguageMode.zhHans => 'zh-Hans',
     AppLanguageMode.zhHant => 'zh-Hant',
     AppLanguageMode.ja => 'ja',
+    AppLanguageMode.ko => 'ko',
     AppLanguageMode.en => 'en',
   };
   Locale? get locale => switch (this) {
@@ -52,6 +55,7 @@ extension AppLanguageModeValue on AppLanguageMode {
       scriptCode: 'Hant',
     ),
     AppLanguageMode.ja => const Locale('ja'),
+    AppLanguageMode.ko => const Locale('ko'),
     AppLanguageMode.en => const Locale('en'),
   };
   static AppLanguageMode parse(Object? value) =>
@@ -69,6 +73,7 @@ class AppLocalizations {
     Locale.fromSubtags(languageCode: 'zh', scriptCode: 'Hans'),
     Locale.fromSubtags(languageCode: 'zh', scriptCode: 'Hant'),
     Locale('ja'),
+    Locale('ko'),
   ];
   static const delegate = _AppLocalizationsDelegate();
   static AppLocalizations of(BuildContext context) =>
@@ -81,6 +86,7 @@ class AppLocalizations {
     for (final locale in preferred ?? const <Locale>[]) {
       final language = locale.languageCode.toLowerCase();
       if (language == 'ja') return const Locale('ja');
+      if (language == 'ko') return const Locale('ko');
       if (language == 'en') return const Locale('en');
       if (language == 'zh') {
         final traditional =
@@ -99,14 +105,15 @@ class AppLocalizations {
     return const Locale('en');
   }
 
-  String get code => locale.languageCode == 'ja'
-      ? 'ja'
-      : locale.languageCode != 'zh'
-      ? 'en'
-      : locale.scriptCode == 'Hant' ||
+  String get code => switch (locale.languageCode.toLowerCase()) {
+    'ja' => 'ja',
+    'ko' => 'ko',
+    'zh' => locale.scriptCode == 'Hant' ||
             const {'TW', 'HK', 'MO'}.contains(locale.countryCode?.toUpperCase())
-      ? 'zh-Hant'
-      : 'zh-Hans';
+        ? 'zh-Hant'
+        : 'zh-Hans',
+    _ => 'en',
+  };
 
   String text(
     String source, {
@@ -114,7 +121,9 @@ class AppLocalizations {
   }) {
     var value = source;
     if (source != '雷player' && source != '雷 player' && code != 'zh-Hans') {
-      final exact = _messages[source]?[code];
+      final exact = code == 'ko'
+          ? appKoMessages[source]
+          : _messages[source]?[code];
       if (exact != null) {
         value = exact;
       } else {
@@ -123,6 +132,8 @@ class AppLocalizations {
                 ? _en
                 : code == 'ja'
                 ? _ja
+                : code == 'ko'
+                ? appKoReplacements
                 : _hant)) {
           value = value.replaceAll(replacement.$1, replacement.$2);
         }
@@ -140,9 +151,13 @@ class AppLocalizations {
             message.args['outcomeUnknown'] != true
         ? 'operation_timeout_read'
         : message.code;
-    final template = _appMessages[messageCode]?[code];
+    final template = code == 'ko'
+        ? appKoErrorMessages[messageCode]
+        : _appMessages[messageCode]?[code];
     if (template == null) {
-      return _appMessages['operation_failed']![code]!;
+      return code == 'ko'
+          ? appKoErrorMessages['operation_failed']!
+          : _appMessages['operation_failed']![code]!;
     }
     var value = template;
     final args = <String, Object?>{...message.args};
@@ -170,6 +185,7 @@ class AppLocalizations {
           'zh-Hans' => zhHans,
           'zh-Hant' => zhHant,
           'ja' => ja,
+          'ko' => appKoPlaybackMessages[zhHans] ?? en,
           _ => en,
         };
     String value(Object? raw) => raw == null || '$raw'.isEmpty
@@ -976,6 +992,7 @@ class AppLocalizations {
     '简体中文': {'zh-Hant': '簡體中文', 'ja': '簡体字中国語', 'en': 'Simplified Chinese'},
     '繁體中文': {'zh-Hant': '繁體中文', 'ja': '繁体字中国語', 'en': 'Traditional Chinese'},
     '日文': {'zh-Hant': '日文', 'ja': '日本語', 'en': 'Japanese'},
+    '韩语': {'zh-Hant': '韓語', 'ja': '韓国語', 'en': 'Korean'},
     '英语': {'zh-Hant': '英語', 'ja': '英語', 'en': 'English'},
     '选择后全局生效并自动保存。跟随系统会使用系统首选语言，不支持时显示英语。': {
       'zh-Hant': '選擇後會全域生效並自動儲存。跟隨系統會使用系統偏好語言，不支援時顯示英語。',
@@ -1808,7 +1825,7 @@ class _AppLocalizationsDelegate
   const _AppLocalizationsDelegate();
   @override
   bool isSupported(Locale locale) =>
-      const {'en', 'zh', 'ja'}.contains(locale.languageCode);
+      const {'en', 'zh', 'ja', 'ko'}.contains(locale.languageCode);
   @override
   Future<AppLocalizations> load(Locale locale) =>
       SynchronousFuture(AppLocalizations(locale));

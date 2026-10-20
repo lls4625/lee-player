@@ -1333,7 +1333,7 @@ final class PlaybackService: NSObject {
         result["engineLogs"] = errors
       }
     }
-    // Existing playback-info formatting exposes this in all four languages,
+    // Existing playback-info formatting exposes this in all supported languages,
     // including before the first PiP request and after the bounded log rolls.
     result["lifecycleEvents"] = ["PiP diagnostics build=\(Self.pipDiagnosticBuild)"] + lifecycleEvents
     result["playerCreations"] = playerCreations
