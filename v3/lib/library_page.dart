@@ -225,7 +225,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    m.addListener(changed);
+    m.libraryUiChanges.addListener(changed);
     // Only a current native PiP restoration can navigate automatically.
     // Ordinary library/mini-player opens call showPlayer directly.
     m.onOpenPlayer = (token) async {
@@ -291,7 +291,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    m.removeListener(changed);
+    m.libraryUiChanges.removeListener(changed);
     m.onOpenPlayer = null;
     developerTip.dispose();
     super.dispose();
@@ -835,7 +835,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           MediaQuery.sizeOf(context).width < 360 ||
               MediaQuery.textScalerOf(context).scale(14) > 20
           ? null
-          : LeiMediaIcon(icon: icon),
+          : LeiContentIcon(icon: icon),
       title: LText(title),
       subtitle: LText(
         saving ? '正在保存…' : '{seconds} 秒',
@@ -900,26 +900,22 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final fieldWidth = constraints.maxWidth > 16
-            ? constraints.maxWidth - 16
-            : constraints.maxWidth;
+        final fieldWidth = constraints.maxWidth;
         final stacked = fieldWidth < 300 || textScaler.scale(16) > 22;
         final menuWidth = fieldWidth < 220
             ? fieldWidth
             : fieldWidth.clamp(220.0, 300.0).toDouble();
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          child: GlassMenu(
-            autoAdjustToScreen: true,
-            menuAlignment: GlassMenuAlignment.topRight,
-            menuWidth: menuWidth,
-            menuHeight: menuHeight,
-            menuPadding: const EdgeInsets.all(12),
-            triggerBuilder: (context, toggleMenu) => GlassButton.custom(
-              label: '$titleText：$currentText',
+        return GlassMenu(
+          autoAdjustToScreen: true,
+          menuAlignment: GlassMenuAlignment.topRight,
+          menuWidth: menuWidth,
+          menuHeight: menuHeight,
+          menuPadding: const EdgeInsets.all(12),
+          triggerBuilder: (context, toggleMenu) => SizedBox(
+            width: fieldWidth,
+            child: LeiContentTapSurface(
+              semanticLabel: '$titleText：$currentText',
               enabled: !savingLanguage,
-              width: fieldWidth,
-              shape: leiRoundedControlShape,
               onTap: toggleMenu,
               child: ConstrainedBox(
                 constraints: BoxConstraints(minHeight: stacked ? 64 : 52),
@@ -1007,24 +1003,24 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                 ),
               ),
             ),
-            items: [
-              for (final option in options)
-                GlassMenuItem(
-                  title: localizations.text(option.$2),
-                  height: itemHeight,
-                  enabled: !savingLanguage,
-                  isSelected: option.$1 == m.languageMode,
-                  trailing: option.$1 == m.languageMode
-                      ? Icon(
-                          Icons.check_rounded,
-                          color: leiAccent(context),
-                          size: 20,
-                        )
-                      : null,
-                  onTap: () => saveLanguage(option.$1),
-                ),
-            ],
           ),
+          items: [
+            for (final option in options)
+              GlassMenuItem(
+                title: localizations.text(option.$2),
+                height: itemHeight,
+                enabled: !savingLanguage,
+                isSelected: option.$1 == m.languageMode,
+                trailing: option.$1 == m.languageMode
+                    ? Icon(
+                        Icons.check_rounded,
+                        color: leiAccent(context),
+                        size: 20,
+                      )
+                    : null,
+                onTap: () => saveLanguage(option.$1),
+              ),
+          ],
         );
       },
     );
@@ -1042,7 +1038,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           MediaQuery.sizeOf(context).width < 360 ||
               MediaQuery.textScalerOf(context).scale(14) > 20
           ? null
-          : LeiMediaIcon(icon: icon),
+          : LeiContentIcon(icon: icon),
       title: LText(title),
       subtitle: LText(
         saving ? '正在保存…' : subtitle,
@@ -1062,6 +1058,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
             )
           : GlassSwitch(
               value: enabled,
+              quality: GlassQuality.minimal,
               onChanged: (value) => savePreference(key, value),
             ),
     );
@@ -1072,6 +1069,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     List<Widget> children, {
     String? footer,
     bool showTitle = true,
+    bool showSurface = true,
   }) => Padding(
     padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
     child: Column(
@@ -1082,10 +1080,13 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
             padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
             child: LText(title, style: Theme.of(context).textTheme.titleMedium),
           ),
-        LeiSurface(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Column(children: children),
-        ),
+        if (showSurface)
+          LeiContentSurface(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Column(children: children),
+          )
+        else
+          Column(children: children),
         if (footer != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(8, 10, 8, 0),
@@ -1103,74 +1104,83 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
   Widget appearanceCard(String key, String label) {
     final selected = m.appearance == key;
     final dark = key == 'dark';
-    return Semantics(
+    final twoLineLabelHeight =
+        MediaQuery.textScalerOf(context).scale(14) * 1.3 * 2;
+    final labelHeight = twoLineLabelHeight < 44 ? 44.0 : twoLineLabelHeight;
+    return LeiContentTapSurface(
       selected: selected,
-      button: true,
-      label: AppLocalizations.of(context).text(
+      semanticLabel: AppLocalizations.of(context).text(
         '{label}外观',
         args: {'label': AppLocalizations.of(context).text(label)},
       ),
-      child: GlassButton.custom(
-        label: AppLocalizations.of(context).text(
-          '{label}外观',
-          args: {'label': AppLocalizations.of(context).text(label)},
+      enabled: !savingAppearance,
+      onTap: () => saveAppearance(key),
+      padding: EdgeInsets.zero,
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: selected
+                ? leiAccent(context)
+                : Theme.of(
+                    context,
+                  ).colorScheme.outline.withValues(alpha: .16),
+            width: selected ? 2 : 1,
+          ),
         ),
-        enabled: !savingAppearance,
-        shape: leiRoundedControlShape,
-        onTap: () => saveAppearance(key),
-        child: Container(
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(
-              color: selected
-                  ? leiAccent(context)
-                  : Theme.of(context).colorScheme.outline
-                        .withValues(alpha: .16),
-              width: selected ? 2 : 1,
+        child: Column(
+          children: [
+            Container(
+              height: 54,
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(9),
+                gradient: LinearGradient(
+                  colors: key == 'system'
+                      ? const [Color(0xfff5f2e9), Color(0xff25262e)]
+                      : dark
+                      ? const [Color(0xff25262e), Color(0xff17181d)]
+                      : const [Color(0xfffffaf0), Color(0xffeef0f5)],
+                ),
+              ),
+              child: Align(
+                alignment: Alignment.bottomLeft,
+                child: Container(
+                  height: 12,
+                  width: 36,
+                  decoration: BoxDecoration(
+                    color: leiGold,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ),
             ),
-          ),
-          child: Column(
-            children: [
-              Container(
-                height: 54,
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(9),
-                  gradient: LinearGradient(
-                    colors: key == 'system'
-                        ? const [Color(0xfff5f2e9), Color(0xff25262e)]
-                        : dark
-                        ? const [Color(0xff25262e), Color(0xff17181d)]
-                        : const [Color(0xfffffaf0), Color(0xffeef0f5)],
-                  ),
-                ),
-                child: Align(
-                  alignment: Alignment.bottomLeft,
-                  child: Container(
-                    height: 12,
-                    width: 36,
-                    decoration: BoxDecoration(
-                      color: leiGold,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
+            const SizedBox(height: 10),
+            SizedBox(
+              height: labelHeight,
+              child: Center(
+                child: LText(
+                  label,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.labelMedium,
                 ),
               ),
-              const SizedBox(height: 10),
-              LText(
-                label,
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.labelMedium,
+            ),
+            const SizedBox(height: 6),
+            SizedBox(
+              height: 48,
+              child: Center(
+                child: LeiContentIcon(
+                  icon: selected
+                      ? Icons.check_circle_rounded
+                      : Icons.circle_outlined,
+                ),
               ),
-              const SizedBox(height: 6),
-              LeiMediaIcon(
-                icon: selected
-                    ? Icons.check_circle_rounded
-                    : Icons.circle_outlined,
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
@@ -1252,11 +1262,12 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         [languagePreference()],
         footer: '选择后全局生效并自动保存。跟随系统会使用系统首选语言，不支持时显示英语。',
         showTitle: false,
+        showSurface: false,
       ),
-      () => settingSection('外观', [
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: LayoutBuilder(
+      () => settingSection(
+        '外观',
+        [
+          LayoutBuilder(
             builder: (context, constraints) {
               final stacked =
                   constraints.maxWidth < 280 ||
@@ -1276,8 +1287,10 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
               );
             },
           ),
-        ),
-      ], footer: savingAppearance ? '正在保存外观…' : '选择后立即生效，自动保存。'),
+        ],
+        footer: savingAppearance ? '正在保存外观…' : '选择后立即生效，自动保存。',
+        showSurface: false,
+      ),
       () => settingSection('播放', [
         preference(
           Icons.history_rounded,
@@ -1317,14 +1330,14 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       () => settingSection('文件与记录', [
         LeiGlassTile(
           flat: true,
-          leading: const LeiMediaIcon(icon: Icons.restore_from_trash_outlined),
+          leading: const LeiContentIcon(icon: Icons.restore_from_trash_outlined),
           title: const LText('回收站'),
           subtitle: const LText('找回已移除的文件'),
           onTap: trash,
         ),
         LeiGlassTile(
           flat: true,
-          leading: const LeiMediaIcon(icon: Icons.history_rounded),
+          leading: const LeiContentIcon(icon: Icons.history_rounded),
           title: const LText('清除播放历史'),
           subtitle: const LText('保留收藏和媒体文件'),
           onTap: () async {
@@ -1338,14 +1351,14 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       () => settingSection('支持开发', [
         LeiGlassTile(
           flat: true,
-          leading: const LeiMediaIcon(icon: Icons.volunteer_activism_outlined),
+          leading: const LeiContentIcon(icon: Icons.volunteer_activism_outlined),
           title: const LText('打赏开发者'),
           subtitle: const LText('通过 App Store 自愿支持，不解锁任何功能'),
           onTap: showDeveloperTip,
         ),
         LeiGlassTile(
           flat: true,
-          leading: const LeiMediaIcon(icon: Icons.star_rate_rounded),
+          leading: const LeiContentIcon(icon: Icons.star_rate_rounded),
           title: const LText('在 App Store 评价'),
           subtitle: const LText('喜欢雷player？欢迎留下评分与评论'),
           onTap: openAppStoreReview,
@@ -1354,7 +1367,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
       () => settingSection('关于雷player', [
         const LeiGlassTile(
           flat: true,
-          leading: LeiMediaIcon(icon: Icons.bolt_rounded),
+          leading: LeiContentIcon(icon: Icons.bolt_rounded),
           title: LText('雷player'),
           subtitle: LText(
             '专注本地课程，陪你随时进入学习。\n'
@@ -1380,7 +1393,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         ),
         LeiGlassTile(
           flat: true,
-          leading: const LeiMediaIcon(icon: Icons.privacy_tip_outlined),
+          leading: const LeiContentIcon(icon: Icons.privacy_tip_outlined),
           title: const LText('隐私政策'),
           subtitle: const LText('本地数据处理、保留与联系信息'),
           onTap: () => showLegalDocument(
@@ -1391,14 +1404,14 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         ),
         LeiGlassTile(
           flat: true,
-          leading: const LeiMediaIcon(icon: Icons.code_rounded),
+          leading: const LeiContentIcon(icon: Icons.code_rounded),
           title: const LText('开源软件许可'),
           subtitle: const LText('Flutter、Dart 与原生播放器版权、源码及许可证'),
           onTap: showOpenSourceLicenses,
         ),
         LeiGlassTile(
           flat: true,
-          leading: const LeiMediaIcon(icon: Icons.copyright_rounded),
+          leading: const LeiContentIcon(icon: Icons.copyright_rounded),
           title: const LText('版权与用户内容'),
           subtitle: const LText('版权所有者、用户责任与合规联系'),
           onTap: () =>
@@ -1409,9 +1422,6 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     return ListView.builder(
       key: const Key('settings-list'),
       padding: const EdgeInsets.only(bottom: 24),
-      // Keep the next group of glass controls ready before it enters the
-      // viewport, avoiding shader/widget setup during an active scroll.
-      cacheExtent: MediaQuery.sizeOf(context).height * .75,
       itemCount: sections.length,
       itemBuilder: (context, index) => sections[index](),
     );
@@ -1574,11 +1584,60 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
     return latest;
   }
 
+  Widget resumeProgress(MediaEntry entry) => ValueListenableBuilder<int>(
+    valueListenable: m.playbackProgressChanges,
+    builder: (context, _, __) {
+      final current = entry.path == m.path;
+      final progress = m.displayProgress(entry.path, forResumeCard: true);
+      final position = progress?.position ?? 0;
+      final duration = progress?.duration ?? 0;
+      if (progress == null) {
+        return LText(
+          current && m.presentationWaiting
+              ? '正在等待画中画结束'
+              : current && m.loading
+              ? '正在加载'
+              : '播放进度暂不可用',
+          style: Theme.of(context).textTheme.bodySmall,
+        );
+      }
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          LText(
+            '{status} {position} / {duration}',
+            args: {
+              'status': AppLocalizations.of(context).text(
+                current && m.loading
+                    ? '正在加载'
+                    : current && m.playing
+                    ? '正在播放'
+                    : '已播',
+              ),
+              'position': timeLabel(position),
+              'duration': timeLabel(duration),
+            },
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 10),
+          GlassProgressIndicator.linear(
+            minWidth: 0,
+            height: 3,
+            value: duration > 0
+                ? (position / duration).clamp(0, 1).toDouble()
+                : 0,
+            color: leiAccent(context),
+            semanticLabel: AppLocalizations.of(
+              context,
+            ).text('当前课程播放进度'),
+          ),
+        ],
+      );
+    },
+  );
+
   Widget resumeCard(MediaEntry entry) {
     final current = entry.path == m.path;
-    final progress = m.displayProgress(entry.path, forResumeCard: true);
-    final position = progress?.position ?? 0;
-    final duration = progress?.duration ?? 0;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
       child: Column(
@@ -1586,7 +1645,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         children: [
           LText('继续学习', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
-          LeiSurface(
+          LeiContentSurface(
             accent: true,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1594,7 +1653,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    LeiMediaIcon(
+                    LeiContentIcon(
                       icon: entry.isAudio
                           ? Icons.headphones_rounded
                           : Icons.play_lesson_outlined,
@@ -1626,44 +1685,12 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                   ],
                 ),
                 const SizedBox(height: 18),
-                if (progress == null)
-                  LText(
-                    current && m.presentationWaiting ? '正在等待画中画结束'
-                      : current && m.loading ? '正在加载' : '播放进度暂不可用',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  )
-                else ...[
-                  LText(
-                    '{status} {position} / {duration}',
-                    args: {
-                      'status': AppLocalizations.of(context).text(
-                        current && m.loading
-                            ? '正在加载'
-                            : current && m.playing
-                            ? '正在播放'
-                            : '已播',
-                      ),
-                      'position': timeLabel(position),
-                      'duration': timeLabel(duration),
-                    },
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 10),
-                  GlassProgressIndicator.linear(
-                    minWidth: 0,
-                    height: 3,
-                    value: duration > 0
-                        ? (position / duration).clamp(0, 1).toDouble()
-                        : 0,
-                    color: leiAccent(context),
-                    semanticLabel: AppLocalizations.of(context).text('当前课程播放进度'),
-                  ),
-                ],
+                resumeProgress(entry),
                 const SizedBox(height: 16),
                 Row(
                   children: [
                     Expanded(
-                      child: LeiGlassButton(
+                      child: LeiContentButton(
                         label: current && (m.transportShowsPause || m.presentationWaiting)
                             ? '返回播放'
                             : '继续播放',
@@ -1680,7 +1707,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                     ),
                     if (current && m.transportShowsPause) ...[
                       const SizedBox(width: 10),
-                      LeiGlassIconButton(
+                      LeiContentIconButton(
                         icon: const Icon(Icons.pause_rounded),
                         tooltip: m.loading ? '取消加载' : '暂停',
                         onPressed: m.toggle,
@@ -1759,7 +1786,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
 
   Widget emptyLibrary() => Padding(
     padding: const EdgeInsets.all(24),
-    child: LeiSurface(
+    child: LeiContentSurface(
       child: SizedBox(
         key: Key(
           m.initializing
@@ -1771,7 +1798,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            LeiMediaIcon(
+            LeiContentIcon(
               icon: tab == 1
                   ? Icons.history_rounded
                   : tab == 2
@@ -1818,6 +1845,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
 
   Widget entryMenu(MediaEntry entry, Map<String, dynamic> record) =>
       LeiGlassMenu(
+        lightweightTrigger: true,
         tooltip: '{name} · 更多操作',
         tooltipArgs: {'name': entry.name},
         onSelected: (value) => action(entry, value),
@@ -1832,9 +1860,8 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
         },
       );
 
-  Widget fileRow(MediaEntry e) {
+  Widget fileRowDetails(MediaEntry e, Map<String, dynamic> record) {
     final localizations = AppLocalizations.of(context);
-    final r = m.record(e.path);
     final progress = m.displayProgress(e.path);
     final position = progress?.position ?? 0;
     final duration = progress?.duration ?? 0;
@@ -1848,53 +1875,66 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
               localizations.text('已播 {time}', args: {
                 'time': timeLabel(position),
               }),
-            if (r['favorite'] == true) localizations.text('已收藏'),
+            if (record['favorite'] == true) localizations.text('已收藏'),
           ].join(' · ');
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 4),
+        Text(details, style: Theme.of(context).textTheme.bodySmall),
+        if (tab != 0 && e.parent.isNotEmpty)
+          Text(
+            e.parent,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        if (e.isPlayable && duration > 0 && position > 0) ...[
+          const SizedBox(height: 8),
+          Semantics(
+            label: AppLocalizations.of(context).text('播放进度'),
+            value: '${(position / duration * 100).clamp(0, 100).round()}%',
+            child: GlassProgressIndicator.linear(
+              value: (position / duration).clamp(0, 1).toDouble(),
+              height: 3,
+              minWidth: 0,
+              color: leiAccent(context),
+              backgroundColor: leiAccent(context).withValues(alpha: .1),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget fileRow(MediaEntry e) {
+    final r = m.record(e.path);
+    final currentPlayable = e.isPlayable && e.path == m.path;
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-      child: LeiGlassTile(
-        leading: MediaQuery.textScalerOf(context).scale(14) > 20
-            ? null
-            : LeiMediaIcon(icon: entryIcon(e)),
-        title: Text(
-          e.name,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-          style: Theme.of(context).textTheme.titleMedium,
+      child: LeiContentSurface(
+        padding: EdgeInsets.zero,
+        borderRadius: 16,
+        child: LeiGlassTile(
+          flat: true,
+          leading: MediaQuery.textScalerOf(context).scale(14) > 20
+              ? null
+              : LeiContentIcon(icon: entryIcon(e)),
+          title: Text(
+            e.name,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          subtitle: currentPlayable
+              ? ValueListenableBuilder<int>(
+                  valueListenable: m.playbackProgressChanges,
+                  builder: (context, _, __) => fileRowDetails(e, r),
+                )
+              : fileRowDetails(e, r),
+          onTap: () => open(e),
+          trailing: entryMenu(e, r),
         ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const SizedBox(height: 4),
-            Text(
-              details,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            if (tab != 0 && e.parent.isNotEmpty)
-              Text(
-                e.parent,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            if (e.isPlayable && duration > 0 && position > 0) ...[
-              const SizedBox(height: 8),
-              Semantics(
-                label: AppLocalizations.of(context).text('播放进度'),
-                value: '${(position / duration * 100).clamp(0, 100).round()}%',
-                child: GlassProgressIndicator.linear(
-                  value: (position / duration).clamp(0, 1).toDouble(),
-                  height: 3,
-                  minWidth: 0,
-                  color: leiAccent(context),
-                  backgroundColor: leiAccent(context).withValues(alpha: .1),
-                ),
-              ),
-            ],
-          ],
-        ),
-        onTap: () => open(e),
-        trailing: entryMenu(e, r),
       ),
     );
   }
@@ -1910,13 +1950,13 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: () => open(entry),
-              child: LeiSurface(
+              child: LeiContentSurface(
                 padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
                 child: SizedBox.expand(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      LeiMediaIcon(icon: entryIcon(entry)),
+                      LeiContentIcon(icon: entryIcon(entry)),
                       const SizedBox(height: 14),
                       Text(
                         entry.name,
@@ -1957,13 +1997,14 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
             : AppLocalizations.of(context).message(AppMessage(progressCode)));
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-      child: LeiSurface(
+      child: LeiContentSurface(
         accent: true,
         padding: const EdgeInsets.all(8),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             LeiGlassTile(
+              flat: true,
               dense: true,
               title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
               subtitle: LText(
@@ -1971,7 +2012,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                     ? '${sizeLabel(done)} / ${sizeLabel(total)}'
                     : '等待选择或准备文件…',
               ),
-              trailing: LeiGlassIconButton(
+              trailing: LeiContentIconButton(
                 icon: const Icon(Icons.close),
                 tooltip: '取消导入',
                 onPressed: () => m.command('cancelImport'),
@@ -1988,6 +2029,49 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
           ],
         ),
       ),
+    );
+  }
+
+  Widget libraryScrollView(List<MediaEntry> items) {
+    final scrollView = CustomScrollView(
+      key: PageStorageKey('library/$tab/$folder'),
+      primary: true,
+      slivers: [
+        SliverToBoxAdapter(child: libraryHeader()),
+        if (items.isEmpty)
+          SliverToBoxAdapter(child: emptyLibrary())
+        else if (m.libraryLayout == 'grid' && tab != 1)
+          SliverPadding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            sliver: SliverGrid(
+              delegate: SliverChildBuilderDelegate(
+                (context, index) => fileGridCard(items[index]),
+                childCount: items.length,
+              ),
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 220,
+                mainAxisExtent: 190,
+                crossAxisSpacing: 8,
+                mainAxisSpacing: 8,
+              ),
+            ),
+          )
+        else
+          SliverList(
+            delegate: SliverChildBuilderDelegate(
+              (context, index) => fileRow(items[index]),
+              childCount: items.length,
+            ),
+          ),
+        const SliverToBoxAdapter(child: SizedBox(height: 24)),
+      ],
+    );
+    if (tab != 0) return scrollView;
+    return Scrollbar(
+      thumbVisibility: false,
+      interactive: true,
+      notificationPredicate: (notification) => notification.depth == 0,
+      child: scrollView,
     );
   }
 
@@ -2062,7 +2146,11 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                           ),
                       ]),
                     ),
-                  if (m.importing) importStatus(),
+                  if (m.importing)
+                    ValueListenableBuilder<int>(
+                      valueListenable: m.importProgressChanges,
+                      builder: (context, _, __) => importStatus(),
+                    ),
                   if (tab == 0 && m.importIssue != null)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(20, 8, 12, 8),
@@ -2104,44 +2192,7 @@ class _LibraryPageState extends State<LibraryPage> with WidgetsBindingObserver {
                   Expanded(
                     child: tab == 3
                         ? settings()
-                        : CustomScrollView(
-                            key: PageStorageKey('library/$tab/$folder'),
-                            slivers: [
-                              SliverToBoxAdapter(child: libraryHeader()),
-                              if (items.isEmpty)
-                                SliverToBoxAdapter(child: emptyLibrary())
-                              else if (m.libraryLayout == 'grid' && tab != 1)
-                                SliverPadding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                  ),
-                                  sliver: SliverGrid(
-                                    delegate: SliverChildBuilderDelegate(
-                                      (context, index) =>
-                                          fileGridCard(items[index]),
-                                      childCount: items.length,
-                                    ),
-                                    gridDelegate:
-                                        const SliverGridDelegateWithMaxCrossAxisExtent(
-                                          maxCrossAxisExtent: 220,
-                                          mainAxisExtent: 190,
-                                          crossAxisSpacing: 8,
-                                          mainAxisSpacing: 8,
-                                        ),
-                                  ),
-                                )
-                              else
-                                SliverList(
-                                  delegate: SliverChildBuilderDelegate(
-                                    (context, index) => fileRow(items[index]),
-                                    childCount: items.length,
-                                  ),
-                                ),
-                              const SliverToBoxAdapter(
-                                child: SizedBox(height: 24),
-                              ),
-                            ],
-                          ),
+                        : libraryScrollView(items),
                   ),
                 ],
               ),

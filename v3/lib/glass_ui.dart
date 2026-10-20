@@ -66,6 +66,185 @@ class LeiSurface extends StatelessWidget {
   }
 }
 
+Color _leiContentFill(BuildContext context) {
+  final dark = Theme.of(context).brightness == Brightness.dark;
+  return dark
+      ? const Color(0xff30343a).withValues(alpha: .82)
+      : Colors.white.withValues(alpha: .74);
+}
+
+Color _leiContentBorder(BuildContext context) =>
+    Theme.of(context).colorScheme.outlineVariant.withValues(alpha: .55);
+
+/// A static translucent surface for content that moves with a scroll view.
+/// It deliberately avoids backdrop sampling and per-frame glass refraction.
+class LeiContentSurface extends StatelessWidget {
+  const LeiContentSurface({
+    super.key,
+    required this.child,
+    this.accent = false,
+    this.padding = const EdgeInsets.all(20),
+    this.borderRadius = 22,
+  });
+  final Widget child;
+  final bool accent;
+  final EdgeInsetsGeometry padding;
+  final double borderRadius;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+    decoration: BoxDecoration(
+      color: _leiContentFill(context),
+      borderRadius: BorderRadius.circular(borderRadius),
+      border: Border.all(
+        color: accent ? leiAccent(context) : _leiContentBorder(context),
+        width: accent ? 1.5 : 1,
+      ),
+    ),
+    child: Padding(padding: padding, child: child),
+  );
+}
+
+class LeiContentIcon extends StatelessWidget {
+  const LeiContentIcon({super.key, required this.icon});
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) => SizedBox.square(
+    dimension: 48,
+    child: DecoratedBox(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest
+            .withValues(alpha: .72),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _leiContentBorder(context)),
+      ),
+      child: Icon(icon, color: leiAccent(context), size: 24),
+    ),
+  );
+}
+
+class LeiContentTapSurface extends StatelessWidget {
+  const LeiContentTapSurface({
+    super.key,
+    required this.child,
+    required this.onTap,
+    this.enabled = true,
+    this.semanticLabel,
+    this.selected,
+    this.accent = false,
+    this.padding = const EdgeInsets.symmetric(horizontal: 16),
+    this.height = 48,
+    this.borderRadius = 12,
+  });
+  final Widget child;
+  final VoidCallback onTap;
+  final bool enabled;
+  final String? semanticLabel;
+  final bool? selected;
+  final bool accent;
+  final EdgeInsetsGeometry padding;
+  final double height;
+  final double borderRadius;
+
+  @override
+  Widget build(BuildContext context) {
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(borderRadius),
+      side: BorderSide(
+        color: accent ? leiAccent(context) : _leiContentBorder(context),
+        width: accent ? 1.5 : 1,
+      ),
+    );
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      label: semanticLabel,
+      selected: selected,
+      child: Material(
+        color: enabled
+            ? _leiContentFill(context)
+            : _leiContentFill(context).withValues(alpha: .45),
+        shape: shape,
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: enabled ? onTap : null,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: height),
+            child: Padding(padding: padding, child: child),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class LeiContentButton extends StatelessWidget {
+  const LeiContentButton({
+    super.key,
+    required this.onPressed,
+    required this.label,
+    this.icon,
+  });
+  final VoidCallback? onPressed;
+  final String label;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) => LeiContentTapSurface(
+    onTap: onPressed ?? () {},
+    enabled: onPressed != null,
+    semanticLabel: AppLocalizations.of(context).text(label),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        if (icon != null) ...[
+          ExcludeSemantics(child: Icon(icon)),
+          const SizedBox(width: 8),
+        ],
+        Flexible(
+          child: LText(label, textAlign: TextAlign.center, softWrap: true),
+        ),
+      ],
+    ),
+  );
+}
+
+class LeiContentIconButton extends StatelessWidget {
+  const LeiContentIconButton({
+    super.key,
+    required this.icon,
+    required this.onPressed,
+    this.tooltip,
+    this.tooltipArgs = const <String, Object?>{},
+  });
+  final Widget icon;
+  final VoidCallback? onPressed;
+  final String? tooltip;
+  final Map<String, Object?> tooltipArgs;
+
+  @override
+  Widget build(BuildContext context) {
+    final localizedTooltip = tooltip == null
+        ? null
+        : AppLocalizations.of(context).text(tooltip!, args: tooltipArgs);
+    final button = SizedBox.square(
+      dimension: 44,
+      child: LeiContentTapSurface(
+        onTap: onPressed ?? () {},
+        enabled: onPressed != null,
+        semanticLabel: localizedTooltip,
+        padding: EdgeInsets.zero,
+        child: Center(child: icon),
+      ),
+    );
+    return localizedTooltip == null
+        ? button
+        : Tooltip(message: localizedTooltip, child: button);
+  }
+}
+
 class LeiSectionHeading extends StatelessWidget {
   const LeiSectionHeading({
     super.key,
@@ -445,6 +624,7 @@ class LeiGlassMenu extends StatelessWidget {
     this.tooltip = '更多操作',
     this.tooltipArgs = const <String, Object?>{},
     this.selected,
+    this.lightweightTrigger = false,
   }) : assert(items == null || choices.isEmpty);
   final Map<String, String> choices;
   final ValueChanged<String> onSelected;
@@ -453,6 +633,7 @@ class LeiGlassMenu extends StatelessWidget {
   final String tooltip;
   final Map<String, Object?> tooltipArgs;
   final String? selected;
+  final bool lightweightTrigger;
   @override
   Widget build(BuildContext context) {
     final mediaQuery = MediaQuery.of(context);
@@ -493,12 +674,19 @@ class LeiGlassMenu extends StatelessWidget {
       autoAdjustToScreen: true,
       menuHeight: menuHeight,
       menuPadding: menuPadding,
-      triggerBuilder: (context, toggle) => LeiGlassIconButton(
-        icon: Icon(icon),
-        tooltip: tooltip,
-        tooltipArgs: tooltipArgs,
-        onPressed: toggle,
-      ),
+      triggerBuilder: (context, toggle) => lightweightTrigger
+          ? LeiContentIconButton(
+              icon: Icon(icon),
+              tooltip: tooltip,
+              tooltipArgs: tooltipArgs,
+              onPressed: toggle,
+            )
+          : LeiGlassIconButton(
+              icon: Icon(icon),
+              tooltip: tooltip,
+              tooltipArgs: tooltipArgs,
+              onPressed: toggle,
+            ),
       items: menuItems,
     );
   }

@@ -35,6 +35,9 @@ class PlayerModel extends ChangeNotifier {
     mediaKit.addListener(_notify);
   }
   final mediaKit = MediaKitPlayback();
+  final ValueNotifier<int> libraryUiChanges = ValueNotifier<int>(0);
+  final ValueNotifier<int> playbackProgressChanges = ValueNotifier<int>(0);
+  final ValueNotifier<int> importProgressChanges = ValueNotifier<int>(0);
   final Map<String, Duration> _commandTimeouts;
   static const _methods = MethodChannel('lei.player/methods');
   static const _events = EventChannel('lei.player/events');
@@ -145,7 +148,13 @@ class PlayerModel extends ChangeNotifier {
       },
     );
   }
-  AppMessage? message;
+  AppMessage? _message;
+  int _messageRevision = 0;
+  AppMessage? get message => _message;
+  set message(AppMessage? value) {
+    _message = value;
+    if (value != null) _messageRevision++;
+  }
   Future<void> Function(String? restoreToken)? onOpenPlayer;
   String get path => state['path'] as String? ?? '';
   bool get playing => state['playing'] == true;
@@ -426,8 +435,79 @@ class PlayerModel extends ChangeNotifier {
     return const Duration(seconds: 10);
   }
 
+  Object? _lastLibraryUiState;
+  Object? _lastPlaybackProgressState;
+  Object? _lastImportProgressState;
+
+  void _syncSpecializedNotifiers() {
+    final libraryUiState = (
+      libraryRevision,
+      initializing,
+      scanning,
+      importing,
+      fileBusy,
+      recordsIssue,
+      importIssue,
+      importSkippedPaths,
+      importSkippedCount,
+      appearance,
+      languageMode,
+      libraryLayout,
+      librarySort,
+      librarySortAscending,
+      state['generation'],
+      state['path'],
+      state['playing'],
+      state['loading'],
+      state['presentationWaiting'],
+      state['wantsPlayback'],
+      state['interrupted'],
+      state['audioRecovery'],
+      state['error'],
+      state['background'],
+      state['rememberProgress'],
+      state['smartIntro'],
+      state['continuous'],
+      state['autoResume'],
+      state['rewindSeconds'],
+      state['forwardSeconds'],
+      _desiredPlaying,
+      _toggleGeneration,
+      _messageRevision,
+    );
+    if (_lastLibraryUiState != libraryUiState) {
+      _lastLibraryUiState = libraryUiState;
+      libraryUiChanges.value++;
+    }
+
+    final playbackProgressState = (
+      state['generation'],
+      state['path'],
+      state['position'],
+      state['duration'],
+      state['progressValid'],
+    );
+    if (_lastPlaybackProgressState != playbackProgressState) {
+      _lastPlaybackProgressState = playbackProgressState;
+      playbackProgressChanges.value++;
+    }
+
+    final importProgressState = (
+      importProgress?['done'],
+      importProgress?['total'],
+      importProgress?['name'],
+      importProgress?['nameCode'],
+    );
+    if (_lastImportProgressState != importProgressState) {
+      _lastImportProgressState = importProgressState;
+      importProgressChanges.value++;
+    }
+  }
+
   void _notify() {
-    if (!_disposed) notifyListeners();
+    if (_disposed) return;
+    _syncSpecializedNotifiers();
+    notifyListeners();
   }
 
   /// Invalidates this isolate's reply handler. The native operation may still
@@ -764,7 +844,7 @@ class PlayerModel extends ChangeNotifier {
     return false;
   }
   void consumeMessage() {
-    message = null;
+    _message = null;
   }
 
   @override
@@ -778,6 +858,9 @@ class PlayerModel extends ChangeNotifier {
     _subscription = null;
     mediaKit.removeListener(_notify);
     mediaKit.dispose();
+    libraryUiChanges.dispose();
+    playbackProgressChanges.dispose();
+    importProgressChanges.dispose();
     super.dispose();
   }
 
