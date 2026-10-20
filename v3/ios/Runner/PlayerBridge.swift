@@ -433,7 +433,7 @@ final class PlayerBridge: NSObject, FlutterPlugin, FlutterStreamHandler, UIDocum
         result(UserDefaults.standard.string(forKey: "language.mode") ?? "system"); return
       case "setLanguage":
         guard let value = args["value"] as? String,
-          ["system", "zh-Hans", "zh-Hant", "ja", "en"].contains(value) else {
+          ["system", "zh-Hans", "zh-Hant", "ja", "ko", "en"].contains(value) else {
           throw LibraryFailure.app("invalid_language_option")
         }
         UserDefaults.standard.set(value, forKey: "language.mode")
