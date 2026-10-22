@@ -759,8 +759,9 @@ class _PlaybackPageState extends State<PlaybackPage> {
             MediaQuery.viewInsetsOf(dialogContext).bottom + 24),
           child: Center(child: SingleChildScrollView(
             child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 400),
-              child: _SleepTimerDialog(initialMinutes: initialMinutes,
-                remainingSeconds: remainingSeconds, timerActive: timerActive)),
+              child: Material(type: MaterialType.transparency,
+                child: _SleepTimerDialog(initialMinutes: initialMinutes,
+                  remainingSeconds: remainingSeconds, timerActive: timerActive))),
           )),
         ),
       ),
